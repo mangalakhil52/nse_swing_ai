@@ -1,8 +1,8 @@
 """
-CIO Orchestrator Agent Module.
-Master coordinator that runs all specialist agents in parallel for each shortlisted candidate,
-collects outputs, applies the 100-pt scoring model, enforces risk vetoes, constructs trade levels,
-and generates final ranked TradeRecommendation dossiers.
+CIO Orchestrator Agent Module — Upgraded with P1 Intelligence Engine.
+Master coordinator that runs all specialist agents (including Thesis Killer) in parallel,
+evaluates Probability-of-Path P(Win) & Expected Value (EV), Execution-Quality slippage modeling,
+applies 100-pt scoring, and surfaces top 0–2 actionable trade recommendations per daily scan cycle.
 """
 
 import asyncio
@@ -24,11 +24,11 @@ from src.agents.relative_strength_agent import RelativeStrengthAgent
 from src.agents.risk_agent import RiskManagementAgent
 from src.agents.sector_agent import SectorRotationAgent
 from src.agents.technical_agent import TechnicalAnalysisAgent
+from src.agents.thesis_killer_agent import ThesisKillerAgent
 from src.agents.trade_construction_agent import TradeConstructionAgent
 from src.core.evidence import EvidenceGraph
 from src.core.models import (
     AgentOutput,
-    CandidateScore,
     SymbolMetadata,
     TradeLevels,
     TradeRecommendation,
@@ -38,13 +38,16 @@ from src.core.types import (
     ConfluenceState,
     ConvictionGrade,
     MarketRegime,
+    PatternType,
     SignalType,
     TradeStatus,
     TradingStance,
 )
+from src.quant.probability_engine import ProbabilityPathEngine
 from src.quant.regime import RegimeAnalysisResult
 from src.quant.screener import ScreenerCandidate
 from src.risk.correlation import PortfolioCorrelationGuard
+from src.risk.execution_quality import ExecutionQualityModel
 from src.risk.veto import RiskVetoEngine
 
 logger = logging.getLogger(__name__)
@@ -53,8 +56,8 @@ logger = logging.getLogger(__name__)
 class CIOOrchestrator:
     """
     Chief Investment Officer Orchestrator.
-    Runs all domain specialist agents in parallel, evaluates scoring, applies vetoes,
-    and surfaces top 0–2 actionable trade recommendations per daily scan cycle.
+    Runs all domain specialist agents (including Thesis Killer) in parallel,
+    evaluates Expected Value (EV), Execution Quality, and risk vetoes.
     """
 
     def __init__(self):
@@ -67,6 +70,7 @@ class CIOOrchestrator:
         self.catalyst_agent = CatalystAgent()
         self.forensic_agent = ForensicAnalysisAgent()
         self.risk_agent = RiskManagementAgent()
+        self.thesis_killer_agent = ThesisKillerAgent()
         self.confluence_agent = ConfluenceAgent()
         self.quant_score_agent = QuantScoreAgent()
         self.trade_construction_agent = TradeConstructionAgent()
@@ -111,6 +115,13 @@ class CIOOrchestrator:
             else:
                 outputs[name] = result
 
+        # Run Thesis Killer with full outputs context
+        killer_ctx = {**context, "agent_outputs": outputs}
+        try:
+            outputs["thesis_killer_agent"] = await self.thesis_killer_agent.execute(symbol_meta, df, evidence_graph, run_id, killer_ctx)
+        except Exception as e:
+            logger.error(f"ThesisKillerAgent exception for {symbol_meta.symbol}: {e}")
+
         return outputs
 
     async def analyze_candidate(
@@ -130,8 +141,8 @@ class CIOOrchestrator:
         # Phase 1: Parallel specialist research
         agent_outputs = await self._run_parallel_agents(symbol_meta, df, evidence_graph, run_id, context)
 
-        # Early exit if forensic or risk agent disqualified
-        for key in ["forensic_analysis_agent", "risk_management_agent"]:
+        # Early exit if forensic, risk, or Thesis Killer agent disqualified candidate
+        for key in ["forensic_analysis_agent", "risk_management_agent", "thesis_killer_agent"]:
             out = agent_outputs.get(key)
             if out and out.disqualification_triggered:
                 logger.info(f"[{symbol_meta.symbol}] DISQUALIFIED by {key}: {out.disqualification_reason}")
@@ -162,6 +173,10 @@ class CIOOrchestrator:
             except Exception:
                 pass
 
+        if not trade_levels:
+            logger.warning(f"[{symbol_meta.symbol}] DISQUALIFIED: Trade construction agent failed to build explicit ATR/pattern-based levels.")
+            return None, {}
+
         # Phase 3: Risk veto evaluation
         market_regime: MarketRegime = context.get("market_regime", MarketRegime.BULL)
         trading_stance: TradingStance = context.get("trading_stance", TradingStance.NORMAL)
@@ -178,7 +193,49 @@ class CIOOrchestrator:
             logger.info(f"[{symbol_meta.symbol}] RISK VETO: {veto.rejection_reasons}")
             return None, {}
 
-        # Phase 4: Confluence evaluation
+        # Phase 4: Probability-of-Path & Expected Value Engine
+        pattern_str = tech_out.metrics.get("pattern_detected", PatternType.FLAT_BASE_BREAKOUT.value) if tech_out else PatternType.FLAT_BASE_BREAKOUT.value
+        try:
+            pattern_enum = PatternType(pattern_str)
+        except ValueError:
+            pattern_enum = PatternType.FLAT_BASE_BREAKOUT
+
+        mansfield_rs = rs_out.metrics.get("mansfield_rs", 0.0) if rs_out else 0.0
+        fcf_pat = fund_out.metrics.get("fcf_to_pat", 0.90) if fund_out else 0.90
+
+        prob_res = ProbabilityPathEngine.evaluate_expectancy(
+            pattern_type=pattern_enum,
+            market_regime=market_regime,
+            mansfield_rs=mansfield_rs,
+            target1_pct=trade_levels.target_1 / max(1.0, trade_levels.current_market_price) * 100.0 - 100.0,
+            stop_loss_pct=trade_levels.risk_percentage,
+            fcf_pat_ratio=fcf_pat,
+        )
+
+        if not prob_res.is_ev_positive:
+            logger.info(f"[{symbol_meta.symbol}] PROBABILITY VETO: {prob_res.disqualification_reason}")
+            return None, {}
+
+        # Phase 5: Execution-Quality & Market Impact Slippage Modeling
+        adtv = float(df["turnover_crores"].mean()) if "turnover_crores" in df.columns else 25.0
+        atr = float(df["high"].tail(14).mean() - df["low"].tail(14).mean()) if len(df) >= 14 else 15.0
+
+        exec_res = ExecutionQualityModel.evaluate_execution_quality(
+            current_price=trade_levels.current_market_price,
+            entry_trigger_price=trade_levels.entry_trigger_price,
+            adtv_crores=adtv,
+            allocated_capital_rupees=trade_levels.allocated_capital_rupees,
+            atr_14=atr,
+        )
+
+        if not exec_res.is_executable:
+            logger.info(f"[{symbol_meta.symbol}] EXECUTION VETO: Poor execution quality (Slippage: {exec_res.expected_slippage_pct:.2f}%).")
+            return None, {}
+
+        # Apply slippage-adjusted entry trigger
+        trade_levels.entry_trigger_price = exec_res.adjusted_entry_trigger
+
+        # Phase 6: Confluence evaluation
         confluence_ctx = {**context, "agent_outputs": agent_outputs}
         conf_out = await self.confluence_agent.execute(symbol_meta, df, evidence_graph, run_id, confluence_ctx)
         agent_outputs["confluence_agent"] = conf_out
@@ -190,7 +247,7 @@ class CIOOrchestrator:
         confluence_state_val = conf_out.metrics.get("confluence_state", ConfluenceState.MODERATE.value)
         confluence_state = ConfluenceState(confluence_state_val)
 
-        # Phase 5: 100-point scoring
+        # Phase 7: 100-point scoring
         score_ctx = {
             **context,
             "agent_outputs": agent_outputs,
@@ -202,7 +259,6 @@ class CIOOrchestrator:
         conviction_str = score_out.metrics.get("conviction_grade", ConvictionGrade.B.value)
         conviction = ConvictionGrade(conviction_str)
 
-        # Reject low-conviction candidates (must be B+ or higher: >= 72 score)
         if conviction in [ConvictionGrade.C, ConvictionGrade.REJECT]:
             logger.info(f"[{symbol_meta.symbol}] Below conviction threshold: {conviction.value} ({composite_score:.1f})")
             return None, {}
@@ -215,22 +271,16 @@ class CIOOrchestrator:
 
         # Why this trade bullets
         why_trade: list[str] = []
-        tech = agent_outputs.get("technical_analysis_agent")
-        rs = agent_outputs.get("relative_strength_agent")
-        fund = agent_outputs.get("fundamental_analysis_agent")
-        if tech and tech.signal == SignalType.BULLISH:
-            pattern = tech.metrics.get("pattern_detected", "Strong Chart Setup")
+        if tech_out and tech_out.signal == SignalType.BULLISH:
+            pattern = tech_out.metrics.get("pattern_detected", "Strong Chart Setup")
             why_trade.append(f"Technical: {pattern}")
-        if rs and rs.signal == SignalType.BULLISH:
-            rs_val = rs.metrics.get("mansfield_rs", 0.0)
+        if rs_out and rs_out.signal == SignalType.BULLISH:
+            rs_val = rs_out.metrics.get("mansfield_rs", 0.0)
             why_trade.append(f"RS Leader: Outperforming NIFTY by {rs_val:.1f}% (Mansfield RS)")
-        if fund and fund.signal == SignalType.BULLISH:
-            pat_g = fund.metrics.get("pat_growth_yoy", 0.0)
-            why_trade.append(f"Fundamentals: PAT growth +{pat_g:.1f}% YoY with improving return ratios")
-
-        if not trade_levels:
-            logger.warning(f"[{symbol_meta.symbol}] DISQUALIFIED: Trade construction agent failed to build explicit ATR/pattern-based levels.")
-            return None, {}
+        if fund_out and fund_out.signal == SignalType.BULLISH:
+            pat_g = fund_out.metrics.get("pat_growth_yoy", 0.0)
+            why_trade.append(f"Fundamentals: PAT growth +{pat_g:.1f}% YoY with FCF/PAT {fund_out.metrics.get('fcf_to_pat', 0.9):.2f}")
+        why_trade.append(f"Expectancy: P(Win) {prob_res.win_probability*100:.0f}%, Net EV +{prob_res.expected_value:.2f}%")
 
         rec_id = f"REC-{datetime.utcnow().strftime('%Y%m%d')}-{symbol_meta.symbol}-{uuid.uuid4().hex[:6].upper()}"
 
@@ -244,11 +294,11 @@ class CIOOrchestrator:
             conviction=conviction,
             composite_score=composite_score,
             levels=trade_levels,
-            technical_setup_description=tech.metrics.get("pattern_detected", "Trend Continuation") if tech else "N/A",
+            technical_setup_description=tech_out.metrics.get("pattern_detected", "Trend Continuation") if tech_out else "N/A",
             catalyst_summary=agent_outputs.get("catalyst_agent", AgentOutput(
                 agent_name="catalyst_agent", symbol=symbol_meta.symbol, run_id=run_id
             )).metrics.get("description", "No catalyst"),
-            fundamental_summary=f"ROE {fund.metrics.get('roe', 0.0):.1f}%, D/E {fund.metrics.get('debt_to_equity', 0.0):.2f}" if fund else "N/A",
+            fundamental_summary=f"ROE {fund_out.metrics.get('roe', 0.0):.1f}%, FCF/PAT {fund_out.metrics.get('fcf_to_pat', 0.9):.2f}" if fund_out else "N/A",
             sector_context=f"Sector rank: #{agent_outputs.get('sector_rotation_agent', AgentOutput(agent_name='s', symbol=symbol_meta.symbol, run_id=run_id)).metrics.get('sector_rank', '?')}",
             market_regime=market_regime.value,
             major_risks=all_risks,
@@ -306,12 +356,6 @@ class CIOOrchestrator:
             except Exception as e:
                 logger.error(f"[CIO] Error analyzing {symbol}: {e}", exc_info=True)
 
-        # STRICT QUANTITATIVE MULTI-FACTOR SORTING (ZERO ALPHABETICAL BIAS)
-        # Factor 1: Composite 100-pt Score (Descending)
-        # Factor 2: Relative Strength Outperformance vs Nifty (Descending)
-        # Factor 3: Technical Pattern & Volume Surge Score (Descending)
-        # Factor 4: Fundamentals PAT growth & ROE Score (Descending)
-        # Factor 5: Delivery Buying & Institutional Flow Score (Descending)
         candidate_evaluations.sort(
             key=lambda item: (
                 -item[0].composite_score,
