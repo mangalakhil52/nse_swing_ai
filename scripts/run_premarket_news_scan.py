@@ -4,11 +4,10 @@ Pre-Market 8:00 AM News, Global Markets & Day Movement Scan — scripts/run_prem
 
 Runs automatically every trading day at 08:00 AM IST (before NSE pre-open at 09:00 AM):
   1. Checks if today is an official NSE trading day.
-  2. Fetches live pre-market GIFT Nifty, US Markets (S&P 500, Nasdaq, Dow), Asian Markets (Nikkei, Hang Seng),
-     Brent Crude Oil, and USD/INR exchange rates.
-  3. Ingests overnight corporate announcements, board meeting outcomes, order wins, and major stock news across Indian equities.
-  4. Generates an AI Pre-Market Day Outlook & Market Movement Analysis for the day.
-  5. Dispatches the 8:00 AM Pre-Market Bulletin to Telegram.
+  2. Ingests GIFT Nifty, US Markets (S&P 500, Nasdaq), Nikkei, Crude Oil, and USD/INR.
+  3. Ingests FII/DII net institutional flows in Cash segment.
+  4. Categorizes overnight stock news: Deals/Orders, Earnings/Results, Insider Trades, and Risks.
+  5. Formats a clean, mobile-optimized 8:00 AM Telegram Pre-Market Bulletin.
 
 Usage:
   python scripts/run_premarket_news_scan.py [--run-now] [--force]
@@ -25,13 +24,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from config.market_hours import MarketCalendar
-from src.agents.catalyst_agent import CatalystAgent
-from src.agents.news_agent import NewsIntelligenceAgent
-from src.core.evidence import EvidenceGraph
 from src.data.global_markets import GlobalMarketProvider
 from src.data.news_provider import FinancialNewsProvider
-from src.data.nse_provider import NseDataProvider
-from src.data.universe import UniverseDiscoveryEngine
 from src.database.connection import init_db
 from src.shadow.telegram_bot import TelegramBotNotifier
 
@@ -57,7 +51,7 @@ async def execute_premarket_news_scan(target_date: date | None = None, force: bo
     run_id = f"NEWS-8AM-{target_date.strftime('%Y%m%d')}-{int(datetime.now().timestamp())}"
 
     logger.info(f"{'='*60}")
-    logger.info(f"NSE SWING AI — 8:00 AM PRE-MARKET GLOBAL MARKETS & NEWS BULLETIN")
+    logger.info(f"NSE SWING AI — 8:00 AM PRE-MARKET BULLETIN (MOBILE-OPTIMIZED)")
     logger.info(f"Run ID: {run_id} | Date: {target_date} | Force: {force}")
     logger.info(f"{'='*60}")
 
@@ -69,121 +63,90 @@ async def execute_premarket_news_scan(target_date: date | None = None, force: bo
     global_provider = GlobalMarketProvider()
     news_provider = FinancialNewsProvider()
     telegram_bot = TelegramBotNotifier()
-    news_agent = NewsIntelligenceAgent()
-    catalyst_agent = CatalystAgent()
 
     # 1. Fetch Global Markets & GIFT Nifty Cues
-    logger.info("Fetching GIFT Nifty, US, Asian markets, Crude Oil & USD/INR pre-market metrics...")
+    logger.info("Fetching GIFT Nifty, US/Asian indices, Crude Oil & USD/INR...")
     global_data = await global_provider.fetch_global_indices()
     gift = global_data["gift_nifty"]
     sp500 = global_data["sp500"]
     nasdaq = global_data["nasdaq"]
     nikkei = global_data["nikkei"]
-    hang_seng = global_data["hang_seng"]
     crude = global_data["brent_crude"]
     usdinr = global_data["usdinr"]
 
-    # 2. Ingest Major Indian Stock News & Announcements
-    nse_provider = NseDataProvider()
-    universe_engine = UniverseDiscoveryEngine(market_data_provider=nse_provider)
-    universe_meta = await universe_engine.build_universe()
-    await nse_provider.close()
+    # 2. Fetch FII / DII Institutional Flows
+    fii_dii = await FinancialNewsProvider.fetch_fii_dii_flows()
 
-    evidence_graph = EvidenceGraph(run_id=run_id)
-    catalyst_alerts = []
-    news_bulletins = []
-    pos_news_count = 0
-    neg_news_count = 0
+    # 3. Categorize Major Stock News & Overnight Filings
+    categorized_news = await news_provider.fetch_categorized_premarket_news()
+    deals = categorized_news.get("deals", [])
+    earnings = categorized_news.get("earnings", [])
+    insider = categorized_news.get("insider_promoter", [])
+    risks = categorized_news.get("risks", [])
 
-    logger.info(f"Ingesting overnight corporate announcements and major stock news...")
+    # 4. Generate Day Market Movement Analysis
+    overall_sentiment = "BULLISH" if gift["change_pts"] >= 0 else "BEARISH"
+    outlook = global_provider.generate_day_outlook(global_data, overall_sentiment)
 
-    for meta in universe_meta[:80]:  # Focus on top 80 liquid Nifty market leaders
-        sym = meta.symbol
-        try:
-            announcements = await news_provider.fetch_company_announcements(sym, lookback_days=2)
-            articles = await news_provider.fetch_latest_news(sym, lookback_days=2)
-
-            if not announcements and not articles:
-                continue
-
-            ctx = {"announcements": announcements, "news_articles": articles}
-            import pandas as pd
-            df_dummy = pd.DataFrame()
-
-            news_out = await news_agent.execute(meta, df_dummy, evidence_graph, run_id, ctx)
-            catalyst_out = await catalyst_agent.execute(meta, df_dummy, evidence_graph, run_id, ctx)
-
-            if catalyst_out.score >= 70.0 or news_out.signal.value == "BULLISH":
-                pos_news_count += 1
-                desc = catalyst_out.metrics.get("description", "Positive Corporate Filing")
-                catalyst_alerts.append(
-                    f"⚡ *{sym}* ({meta.company_name}) | Score: *{catalyst_out.score:.0f}/100*\n"
-                    f"   • {desc}"
-                )
-
-            elif news_out.signal.value == "BEARISH":
-                neg_news_count += 1
-                risk_msg = news_out.risks_identified[0] if news_out.risks_identified else "Negative press headline"
-                news_bulletins.append(
-                    f"⚠️ *{sym}* ({meta.company_name})\n"
-                    f"   • {risk_msg}"
-                )
-
-        except Exception as e:
-            logger.debug(f"Error evaluating news for {sym}: {e}")
-
-    # 3. Generate Day Market Movement Analysis
-    overall_news_sentiment = "BULLISH" if pos_news_count > neg_news_count else ("BEARISH" if neg_news_count > pos_news_count else "NEUTRAL")
-    outlook = global_provider.generate_day_outlook(global_data, overall_news_sentiment)
-
-    # 4. Format 8:00 AM Telegram Bulletin
-    msg_lines = [
-        f"🌅 *NSE SWING AI — 8:00 AM PRE-MARKET BULLETIN*",
-        f"📅 Date: {target_date.strftime('%Y-%m-%d')} | Session: *Pre-Market*",
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        f"🌏 *GLOBAL MARKETS & GIFT NIFTY CUES*",
-        f"  • *GIFT Nifty*: *{gift['price']:,.0f}* ({gift['change_pts']:+.1f} pts / *{gift['change_pct']:+.2f}%*)",
-        f"  • *US Markets*: S&P 500 {sp500['change_pct']:+.2f}% | Nasdaq *{nasdaq['change_pct']:+.2f}%* | Dow {global_data['dow']['change_pct']:+.2f}%",
-        f"  • *Asian Markets*: Nikkei {nikkei['change_pct']:+.2f}% | Hang Seng {hang_seng['change_pct']:+.2f}%",
-        f"  • *Commodities & FX*: Brent Crude ${crude['price']:.1f} ({crude['change_pct']:+.2f}%) | USD/INR ₹{usdinr['price']:.2f}",
+    # 5. Format Clean Mobile-Optimized Telegram Message
+    lines = [
+        f"🌅 *8:00 AM PRE-MARKET BULLETIN*",
+        f"📅 {target_date.strftime('%Y-%m-%d')} | NSE Pre-Market",
+        f"━━━━━━━━━━━━━━━━━━━━",
         f"",
-        f"🎯 *EXPECTED OPENING & DAY MOVEMENT ANALYSIS*",
-        f"  • *Opening Guidance*: *{outlook['expected_gap']}*",
-        f"  • *Day Analysis*: {outlook['movement_analysis']}",
-        f"  • *Key Strategy*: {outlook['key_strategy']}",
+        f"🌐 *GLOBAL CUES & GIFT NIFTY*",
+        f"• *GIFT Nifty*: *{gift['price']:,.0f}* ({gift['change_pts']:+.1f} pts | *{gift['change_pct']:+.2f}%*)",
+        f"• *US Markets*: S&P {sp500['change_pct']:+.2f}% | Nasdaq *{nasdaq['change_pct']:+.2f}%*",
+        f"• *Asia & FX*: Nikkei {nikkei['change_pct']:+.2f}% | Crude ${crude['price']:.1f} ({crude['change_pct']:+.2f}%) | USD/INR ₹{usdinr['price']:.2f}",
         f"",
+        f"🎯 *EXPECTED DAY MOVEMENT*",
+        f"• *Open*: *{outlook['expected_gap']}*",
+        f"• *Trend*: {outlook['gap_type'].replace('_', ' ')} Guidance",
+        f"• *Strategy*: {outlook['key_strategy']}",
+        f"",
+        f"🏛️ *FII / DII CASH FLOWS*",
+        f"• *FII Net*: +₹{fii_dii['fii_net_crores']:,.0f} Cr ({fii_dii['fii_action']})",
+        f"• *DII Net*: +₹{fii_dii['dii_net_crores']:,.0f} Cr ({fii_dii['dii_action']})",
+        f"",
+        f"📰 *TOP STOCK NEWS & FILINGS*",
     ]
 
-    if catalyst_alerts:
-        msg_lines.append(f"📰 *MAJOR STOCKS NEWS & OVERNIGHT FILINGS ({len(catalyst_alerts)}):*")
-        for alert in catalyst_alerts[:6]:
-            msg_lines.append(alert)
-        msg_lines.append("")
+    if deals:
+        lines.append(f"\n📁 *Deals & Order Wins:*")
+        for item in deals[:3]:
+            lines.append(f"• *{item['symbol']}*: {item['headline']}")
 
-    if news_bulletins:
-        msg_lines.append(f"⚠️ *RISK WARNINGS & NEGATIVE NEWS ({len(news_bulletins)}):*")
-        for warn in news_bulletins[:4]:
-            msg_lines.append(warn)
-        msg_lines.append("")
+    if earnings:
+        lines.append(f"\n📊 *Earnings & Results:*")
+        for item in earnings[:3]:
+            lines.append(f"• *{item['symbol']}*: {item['headline']}")
 
-    if not catalyst_alerts and not news_bulletins:
-        msg_lines.append("✅ No high-impact binary filings or negative news across major stocks.")
-        msg_lines.append("Market baseline remains clean for pre-open.")
+    if insider:
+        lines.append(f"\n💼 *Insider & Promoter Trades:*")
+        for item in insider[:2]:
+            lines.append(f"• *{item['symbol']}*: {item['headline']}")
 
-    msg_lines.extend([
+    if risks:
+        lines.append(f"\n⚠️ *Risk Warnings:*")
+        for item in risks[:2]:
+            lines.append(f"• *{item['symbol']}*: {item['headline']}")
+    else:
+        lines.append(f"\n⚠️ *Risk Warnings:*\n• None detected for pre-open.")
+
+    lines.extend([
         f"",
-        f"_Next Scan: 5:00 PM IST EOD Trade Recommendation Cycle_",
+        f"_Next Scan: 5:00 PM IST EOD Cycle_",
     ])
 
-    bulletin_text = "\n".join(msg_lines)
+    bulletin_text = "\n".join(lines)
     logger.info(f"\n{bulletin_text}")
 
-    # 5. Dispatch Telegram Bulletin
+    # 6. Dispatch to Telegram
     if telegram_bot.is_configured:
-        logger.info("Dispatching 8:00 AM Pre-Market News Bulletin to Telegram...")
+        logger.info("Dispatching mobile-optimized bulletin to Telegram...")
         await telegram_bot.send_message(bulletin_text)
 
-    logger.info(f"✅ 8:00 AM Pre-Market News & Global Scan complete for {target_date}.")
+    logger.info(f"✅ Mobile 8:00 AM Pre-Market News Bulletin complete for {target_date}.")
     return 0
 
 
