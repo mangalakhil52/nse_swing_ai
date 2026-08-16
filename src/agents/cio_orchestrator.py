@@ -54,7 +54,7 @@ class CIOOrchestrator:
     """
     Chief Investment Officer Orchestrator.
     Runs all domain specialist agents in parallel, evaluates scoring, applies vetoes,
-    and surfaces top 0–3 actionable trade recommendations per daily scan cycle.
+    and surfaces top 0–2 actionable trade recommendations per daily scan cycle.
     """
 
     def __init__(self):
@@ -119,10 +119,10 @@ class CIOOrchestrator:
         df: pd.DataFrame,
         run_id: str,
         context: dict[str, Any] | None = None,
-    ) -> TradeRecommendation | None:
+    ) -> tuple[TradeRecommendation | None, dict[str, float]]:
         """
         Full research pipeline for a single shortlisted candidate.
-        Returns a TradeRecommendation or None if candidate is disqualified.
+        Returns (TradeRecommendation, sub_scores) or (None, {}) if disqualified.
         """
         context = context or {}
         evidence_graph = EvidenceGraph()
@@ -135,15 +135,26 @@ class CIOOrchestrator:
             out = agent_outputs.get(key)
             if out and out.disqualification_triggered:
                 logger.info(f"[{symbol_meta.symbol}] DISQUALIFIED by {key}: {out.disqualification_reason}")
-                return None
+                return None, {}
+
+        # Extract individual desk quality scores for factor-based tie-breaking
+        rs_out = agent_outputs.get("relative_strength_agent")
+        tech_out = agent_outputs.get("technical_analysis_agent")
+        fund_out = agent_outputs.get("fundamental_analysis_agent")
+        inst_out = agent_outputs.get("institutional_flow_agent")
+
+        desk_sub_scores = {
+            "rs_score": rs_out.score if rs_out else 0.0,
+            "tech_score": tech_out.score if tech_out else 0.0,
+            "fund_score": fund_out.score if fund_out else 0.0,
+            "inst_score": inst_out.score if inst_out else 0.0,
+        }
 
         # Phase 2: Trade geometry construction
-        regime_mult = context.get("regime_risk_multiplier", 1.0)
         trade_ctx = {**context, "agent_outputs": agent_outputs}
         trade_out = await self.trade_construction_agent.execute(symbol_meta, df, evidence_graph, run_id, trade_ctx)
         agent_outputs["trade_construction_agent"] = trade_out
 
-        # Extract TradeLevels from trade output
         trade_levels: TradeLevels | None = None
         if trade_out.metrics and "trade_levels" in trade_out.metrics:
             try:
@@ -165,7 +176,7 @@ class CIOOrchestrator:
 
         if not veto.passed:
             logger.info(f"[{symbol_meta.symbol}] RISK VETO: {veto.rejection_reasons}")
-            return None
+            return None, {}
 
         # Phase 4: Confluence evaluation
         confluence_ctx = {**context, "agent_outputs": agent_outputs}
@@ -174,7 +185,7 @@ class CIOOrchestrator:
 
         if conf_out.disqualification_triggered:
             logger.info(f"[{symbol_meta.symbol}] CONFLUENCE CONFLICT: {conf_out.disqualification_reason}")
-            return None
+            return None, {}
 
         confluence_state_val = conf_out.metrics.get("confluence_state", ConfluenceState.MODERATE.value)
         confluence_state = ConfluenceState(confluence_state_val)
@@ -191,10 +202,10 @@ class CIOOrchestrator:
         conviction_str = score_out.metrics.get("conviction_grade", ConvictionGrade.B.value)
         conviction = ConvictionGrade(conviction_str)
 
-        # Reject low-conviction candidates
+        # Reject low-conviction candidates (must be B+ or higher: >= 72 score)
         if conviction in [ConvictionGrade.C, ConvictionGrade.REJECT]:
             logger.info(f"[{symbol_meta.symbol}] Below conviction threshold: {conviction.value} ({composite_score:.1f})")
-            return None
+            return None, {}
 
         # Compile risks from all agents
         all_risks: list[str] = []
@@ -217,7 +228,6 @@ class CIOOrchestrator:
             pat_g = fund.metrics.get("pat_growth_yoy", 0.0)
             why_trade.append(f"Fundamentals: PAT growth +{pat_g:.1f}% YoY with improving return ratios")
 
-        # Use safe defaults for TradeLevels if construction failed
         if not trade_levels:
             cmp = float(df["close"].iloc[-1]) if not df.empty else 100.0
             trade_levels = TradeLevels(
@@ -255,7 +265,7 @@ class CIOOrchestrator:
                 agent_name="catalyst_agent", symbol=symbol_meta.symbol, run_id=run_id
             )).metrics.get("description", "No catalyst"),
             fundamental_summary=f"ROE {fund.metrics.get('roe', 0.0):.1f}%, D/E {fund.metrics.get('debt_to_equity', 0.0):.2f}" if fund else "N/A",
-            sector_context=f"Sector rank: #{agent_outputs.get('sector_rotation_agent', AgentOutput(agent_name='s', symbol=symbol_meta.symbol, run_id=run_id)).metrics.get('sector_rank', '?')} of {agent_outputs.get('sector_rotation_agent', AgentOutput(agent_name='s', symbol=symbol_meta.symbol, run_id=run_id)).metrics.get('total_sectors', '?')}",
+            sector_context=f"Sector rank: #{agent_outputs.get('sector_rotation_agent', AgentOutput(agent_name='s', symbol=symbol_meta.symbol, run_id=run_id)).metrics.get('sector_rank', '?')}",
             market_regime=market_regime.value,
             major_risks=all_risks,
             invalidation_rules=trade_levels.invalidation_criteria,
@@ -264,12 +274,7 @@ class CIOOrchestrator:
             status=TradeStatus.PENDING_ENTRY,
         )
 
-        logger.info(
-            f"✅ RECOMMENDATION: [{conviction.value}] {symbol_meta.symbol} | Score: {composite_score:.1f} | "
-            f"Entry: ₹{trade_levels.entry_trigger_price:.2f} | SL: ₹{trade_levels.stop_loss_price:.2f} | "
-            f"T1: ₹{trade_levels.target_1:.2f} (R:R {trade_levels.risk_reward_t1:.1f})"
-        )
-        return recommendation
+        return recommendation, desk_sub_scores
 
     async def run_daily_scan(
         self,
@@ -298,9 +303,8 @@ class CIOOrchestrator:
             **(shared_context or {}),
         }
 
-        all_recs: list[TradeRecommendation] = []
+        candidate_evaluations: list[tuple[TradeRecommendation, dict[str, float]]] = []
 
-        # Process candidates sequentially (or in bounded-concurrency batches for production)
         for cand in candidates:
             symbol = cand.symbol
             df = stock_dfs.get(symbol)
@@ -309,18 +313,32 @@ class CIOOrchestrator:
             if df is None or sym_meta is None:
                 continue
 
-            # Use pre-enriched df from screener if available
             enriched_df = cand.enriched_df if cand.enriched_df is not None else df
 
             try:
-                rec = await self.analyze_candidate(sym_meta, enriched_df, run_id, base_context)
+                rec, sub_scores = await self.analyze_candidate(sym_meta, enriched_df, run_id, base_context)
                 if rec:
-                    all_recs.append(rec)
+                    candidate_evaluations.append((rec, sub_scores))
             except Exception as e:
                 logger.error(f"[CIO] Error analyzing {symbol}: {e}", exc_info=True)
 
-        # Sort by composite score descending, then symbol alphabetically for deterministic tie-breaking
-        all_recs.sort(key=lambda r: (-r.composite_score, r.symbol))
+        # STRICT QUANTITATIVE MULTI-FACTOR SORTING (ZERO ALPHABETICAL BIAS)
+        # Factor 1: Composite 100-pt Score (Descending)
+        # Factor 2: Relative Strength Outperformance vs Nifty (Descending)
+        # Factor 3: Technical Pattern & Volume Surge Score (Descending)
+        # Factor 4: Fundamentals PAT growth & ROE Score (Descending)
+        # Factor 5: Delivery Buying & Institutional Flow Score (Descending)
+        candidate_evaluations.sort(
+            key=lambda item: (
+                -item[0].composite_score,
+                -item[1].get("rs_score", 0.0),
+                -item[1].get("tech_score", 0.0),
+                -item[1].get("fund_score", 0.0),
+                -item[1].get("inst_score", 0.0),
+            )
+        )
+
+        all_recs = [item[0] for item in candidate_evaluations]
 
         # Apply portfolio correlation guard (max 2 picks, max 1 per sector)
         final_basket = PortfolioCorrelationGuard.filter_uncorrelated_basket(all_recs, max_picks=2)

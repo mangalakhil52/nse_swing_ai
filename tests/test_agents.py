@@ -116,7 +116,7 @@ def test_cio_orchestrator_full_pipeline():
             "regime_risk_multiplier": 0.75,
             "upcoming_events": [],
         }
-        rec = await cio.analyze_candidate(meta, df, "RUN-TEST-01", ctx)
+        rec, _ = await cio.analyze_candidate(meta, df, "RUN-TEST-01", ctx)
         # In a bull regime with strong uptrend, candidate should produce a recommendation
         # (May be None if score is below conviction threshold - that's acceptable behavior)
         # Just verify no exception is raised and if rec is produced it has valid fields
