@@ -36,4 +36,4 @@ jobs:
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
           commit_message: "Auto-update Excel trade ledger [skip ci]"
-          file_pattern: "data/trade_ledger.xlsx data/trade_ledger.csv data/nse_swing_ai.db"
+          file_pattern: "data/trade_ledger.xlsx data/trade_ledger.csv"
