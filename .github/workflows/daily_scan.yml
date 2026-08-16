@@ -1,0 +1,39 @@
+name: Automated 5 PM NSE Swing AI Daily Scan
+
+on:
+  schedule:
+    # Runs Monday to Friday at 11:30 UTC (which is 17:00 IST / 5:00 PM IST)
+    - cron: '30 11 * * 1-5'
+  workflow_dispatch: # Allows manual trigger anytime from GitHub UI button
+
+jobs:
+  daily_scan_and_ledger_update:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Codebase
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Execute Daily Scan & Auto-Update Trade Ledger
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python scripts/run_automated_scheduler.py --run-now
+
+      - name: Commit Updated Excel Trade Ledger
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Auto-update Excel trade ledger [skip ci]"
+          file_pattern: "data/trade_ledger.xlsx data/trade_ledger.csv data/nse_swing_ai.db"

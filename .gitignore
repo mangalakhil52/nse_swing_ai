@@ -3,13 +3,13 @@ __pycache__/
 *.py[cod]
 *$py.class
 
-# Data & Database Caches (Exclude personal data & sqlite)
-data/
+# Data & Database Caches (Keep trade_ledger.xlsx/csv tracked)
 cache/
 .cache/
 *.db
 *.sqlite
 *.sqlite3
+data/*.db
 
 # Environment Variables & Secrets (IMPORTANT)
 .env
