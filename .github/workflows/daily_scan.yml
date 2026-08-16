@@ -9,6 +9,8 @@ on:
 jobs:
   daily_scan_and_ledger_update:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout Codebase
