@@ -5,9 +5,10 @@ Pre-Market 8:00 AM News, Global Markets & Day Movement Scan — scripts/run_prem
 Runs automatically every trading day at 08:00 AM IST (before NSE pre-open at 09:00 AM):
   1. Checks if today is an official NSE trading day.
   2. Ingests GIFT Nifty, US Markets (S&P 500, Nasdaq), Nikkei, Crude Oil, and USD/INR.
-  3. Ingests FII/DII net institutional flows in Cash segment.
-  4. Categorizes overnight stock news: Deals/Orders, Earnings/Results, Insider Trades, and Risks.
-  5. Formats a clean, mobile-optimized 8:00 AM Telegram Pre-Market Bulletin.
+  3. Calculates tradable Support & Resistance levels for Nifty 50, Bank Nifty, and Sensex.
+  4. Ingests FII/DII net institutional flows in Cash segment.
+  5. Categorizes overnight stock news: Deals/Orders, Earnings/Results, Insider Trades, and Risks.
+  6. Formats a clean, mobile-optimized 8:00 AM Telegram Pre-Market Bulletin.
 
 Usage:
   python scripts/run_premarket_news_scan.py [--run-now] [--force]
@@ -74,21 +75,27 @@ async def execute_premarket_news_scan(target_date: date | None = None, force: bo
     crude = global_data["brent_crude"]
     usdinr = global_data["usdinr"]
 
-    # 2. Fetch FII / DII Institutional Flows
+    # 2. Fetch Index Support & Resistance Levels (Nifty, Bank Nifty, Sensex)
+    levels = GlobalMarketProvider.fetch_index_levels()
+    nifty_lvl = levels["nifty"]
+    bnifty_lvl = levels["banknifty"]
+    sensex_lvl = levels["sensex"]
+
+    # 3. Fetch FII / DII Institutional Flows
     fii_dii = await FinancialNewsProvider.fetch_fii_dii_flows()
 
-    # 3. Categorize Major Stock News & Overnight Filings
+    # 4. Categorize Major Stock News & Overnight Filings
     categorized_news = await news_provider.fetch_categorized_premarket_news()
     deals = categorized_news.get("deals", [])
     earnings = categorized_news.get("earnings", [])
     insider = categorized_news.get("insider_promoter", [])
     risks = categorized_news.get("risks", [])
 
-    # 4. Generate Day Market Movement Analysis
+    # 5. Generate Day Market Movement Analysis
     overall_sentiment = "BULLISH" if gift["change_pts"] >= 0 else "BEARISH"
     outlook = global_provider.generate_day_outlook(global_data, overall_sentiment)
 
-    # 5. Format Clean Mobile-Optimized Telegram Message
+    # 6. Format Clean Mobile-Optimized Telegram Message
     lines = [
         f"🌅 *8:00 AM PRE-MARKET BULLETIN*",
         f"📅 {target_date.strftime('%Y-%m-%d')} | NSE Pre-Market",
@@ -98,6 +105,17 @@ async def execute_premarket_news_scan(target_date: date | None = None, force: bo
         f"• *GIFT Nifty*: *{gift['price']:,.0f}* ({gift['change_pts']:+.1f} pts | *{gift['change_pct']:+.2f}%*)",
         f"• *US Markets*: S&P {sp500['change_pct']:+.2f}% | Nasdaq *{nasdaq['change_pct']:+.2f}%*",
         f"• *Asia & FX*: Nikkei {nikkei['change_pct']:+.2f}% | Crude ${crude['price']:.1f} ({crude['change_pct']:+.2f}%) | USD/INR ₹{usdinr['price']:.2f}",
+        f"",
+        f"📈 *TRADABLE INDEX LEVELS (S&R)*",
+        f"• *Nifty 50* (Pivot: *{nifty_lvl['pivot']:,}*)",
+        f"  S1: `{nifty_lvl['s1']:,}` | S2: `{nifty_lvl['s2']:,}`",
+        f"  R1: `{nifty_lvl['r1']:,}` | R2: `{nifty_lvl['r2']:,}`",
+        f"• *Bank Nifty* (Pivot: *{bnifty_lvl['pivot']:,}*)",
+        f"  S1: `{bnifty_lvl['s1']:,}` | S2: `{bnifty_lvl['s2']:,}`",
+        f"  R1: `{bnifty_lvl['r1']:,}` | R2: `{bnifty_lvl['r2']:,}`",
+        f"• *Sensex* (Pivot: *{sensex_lvl['pivot']:,}*)",
+        f"  S1: `{sensex_lvl['s1']:,}` | S2: `{sensex_lvl['s2']:,}`",
+        f"  R1: `{sensex_lvl['r1']:,}` | R2: `{sensex_lvl['r2']:,}`",
         f"",
         f"🎯 *EXPECTED DAY MOVEMENT*",
         f"• *Open*: *{outlook['expected_gap']}*",
@@ -141,12 +159,12 @@ async def execute_premarket_news_scan(target_date: date | None = None, force: bo
     bulletin_text = "\n".join(lines)
     logger.info(f"\n{bulletin_text}")
 
-    # 6. Dispatch to Telegram
+    # 7. Dispatch to Telegram
     if telegram_bot.is_configured:
         logger.info("Dispatching mobile-optimized bulletin to Telegram...")
         await telegram_bot.send_message(bulletin_text)
 
-    logger.info(f"✅ Mobile 8:00 AM Pre-Market News Bulletin complete for {target_date}.")
+    logger.info(f"✅ Mobile 8:00 AM Pre-Market Bulletin with Index S&R complete for {target_date}.")
     return 0
 
 
