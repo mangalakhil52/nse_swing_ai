@@ -1,0 +1,41 @@
+name: Automated 8 AM Pre-Market News & Catalyst Scan
+
+on:
+  schedule:
+    # Runs Monday to Friday at 02:30 UTC (which is 08:00 AM IST)
+    - cron: '30 2 * * 1-5'
+  workflow_dispatch: # Allows manual trigger anytime from GitHub UI button
+
+jobs:
+  premarket_news_scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout Codebase
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.13
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Execute 8:00 AM Pre-Market News & Catalyst Scan
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python scripts/run_premarket_news_scan.py --run-now --force
+
+      - name: Commit Updated Data & Caches
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Auto-update pre-market news cache [skip ci]"
+          file_pattern: "data/trade_ledger.xlsx data/trade_ledger.csv"
