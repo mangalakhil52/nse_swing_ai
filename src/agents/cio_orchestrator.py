@@ -319,11 +319,11 @@ class CIOOrchestrator:
             except Exception as e:
                 logger.error(f"[CIO] Error analyzing {symbol}: {e}", exc_info=True)
 
-        # Sort by composite score descending
-        all_recs.sort(key=lambda r: r.composite_score, reverse=True)
+        # Sort by composite score descending, then symbol alphabetically for deterministic tie-breaking
+        all_recs.sort(key=lambda r: (-r.composite_score, r.symbol))
 
-        # Apply portfolio correlation guard (max 3 picks, max 1 per sector)
-        final_basket = PortfolioCorrelationGuard.filter_uncorrelated_basket(all_recs, max_picks=3)
+        # Apply portfolio correlation guard (max 2 picks, max 1 per sector)
+        final_basket = PortfolioCorrelationGuard.filter_uncorrelated_basket(all_recs, max_picks=2)
 
         logger.info(
             f"[CIO] Daily scan complete. Analyzed: {len(candidates)} | Qualified: {len(all_recs)} | "
