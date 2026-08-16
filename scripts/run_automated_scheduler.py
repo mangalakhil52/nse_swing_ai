@@ -51,22 +51,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--run-now", action="store_true", help="Execute scan and ledger update immediately")
     parser.add_argument("--setup-windows-task", action="store_true", help="Register automatic daily 5 PM Windows Task")
     parser.add_argument("--date", type=str, default=None, help="Override target date (YYYY-MM-DD)")
+    parser.add_argument("--force", action="store_true", help="Force scan execution even on weekends/holidays")
     return parser.parse_args()
 
 
-async def execute_daily_5pm_cycle(target_date: date | None = None) -> int:
+async def execute_daily_5pm_cycle(target_date: date | None = None, force: bool = False) -> int:
     """Executes the complete 5:00 PM automated trading cycle."""
     target_date = target_date or date.today()
     run_id = f"AUTO-5PM-{target_date.strftime('%Y%m%d')}-{int(datetime.now().timestamp())}"
 
     logger.info(f"{'='*60}")
     logger.info(f"NSE SWING AI — AUTOMATED 5:00 PM DAILY CYCLE")
-    logger.info(f"Run ID: {run_id} | Date: {target_date}")
+    logger.info(f"Run ID: {run_id} | Date: {target_date} | Force: {force}")
     logger.info(f"{'='*60}")
 
     # 1. Trading Day Check
-    if not MarketCalendar.is_trading_day(target_date):
-        logger.info(f"{target_date} is a weekend or NSE market holiday. Skipping automated scan.")
+    if not force and not MarketCalendar.is_trading_day(target_date):
+        logger.info(f"{target_date} is a weekend or NSE market holiday. Skipping automated scan. Use --force to override.")
         return 0
 
     # 2. Initialize DB & Providers
@@ -237,7 +238,7 @@ def main():
 
     if args.run_now or args.date:
         target = date.fromisoformat(args.date) if args.date else date.today()
-        exit_code = asyncio.run(execute_daily_5pm_cycle(target))
+        exit_code = asyncio.run(execute_daily_5pm_cycle(target, force=args.force))
         sys.exit(exit_code)
 
     # Default to continuous loop

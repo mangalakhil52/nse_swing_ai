@@ -4,6 +4,7 @@ Handles HTTP API dispatch of markdown-formatted trade alerts and daily ledger up
 """
 
 import logging
+import os
 from typing import Any
 import httpx
 
@@ -17,18 +18,26 @@ class TelegramBotNotifier:
     """Dispatches trade alerts and daily performance summaries via Telegram Bot API."""
 
     def __init__(self, bot_token: str | None = None, chat_id: str | None = None):
-        self.bot_token = bot_token or settings.TELEGRAM_BOT_TOKEN
-        self.chat_id = chat_id or settings.TELEGRAM_CHAT_ID
+        self.bot_token = bot_token or os.environ.get("TELEGRAM_BOT_TOKEN") or settings.TELEGRAM_BOT_TOKEN
+        self.chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID") or settings.TELEGRAM_CHAT_ID
+
+        if self.is_configured:
+            logger.info(f"Telegram Bot initialized for Chat ID: {str(self.chat_id)[:4]}***")
+        else:
+            logger.warning("Telegram Bot NOT configured (missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID).")
 
     @property
     def is_configured(self) -> bool:
         """Returns True if bot token and chat ID are provided."""
-        return bool(self.bot_token and self.chat_id)
+        token_valid = bool(self.bot_token and str(self.bot_token).strip() != "")
+        chat_valid = bool(self.chat_id and str(self.chat_id).strip() != "")
+        return token_valid and chat_valid
 
     async def send_message(self, text: str, parse_mode: str = "Markdown") -> bool:
         """Sends a text message to the configured Telegram chat."""
         if not self.is_configured:
-            logger.info("Telegram not configured. Message log output:\n" + text)
+            logger.warning("Telegram secrets not detected. Skipping Telegram alert.")
+            logger.info("Message preview:\n" + text)
             return False
 
         url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
@@ -43,13 +52,13 @@ class TelegramBotNotifier:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.post(url, json=payload)
                 if resp.status_code == 200:
-                    logger.info("Successfully dispatched Telegram alert.")
+                    logger.info("✅ Successfully dispatched Telegram alert!")
                     return True
                 else:
-                    logger.error(f"Telegram API error (HTTP {resp.status_code}): {resp.text}")
+                    logger.error(f"❌ Telegram API returned HTTP {resp.status_code}: {resp.text}")
                     return False
         except Exception as e:
-            logger.error(f"Failed to send Telegram message: {e}")
+            logger.error(f"❌ Failed to send Telegram message due to exception: {e}")
             return False
 
     async def dispatch_recommendations(self, recs: list[Any], market_regime: str) -> None:

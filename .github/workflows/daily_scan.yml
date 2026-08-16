@@ -30,7 +30,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
-          python scripts/run_automated_scheduler.py --run-now
+          python scripts/run_automated_scheduler.py --run-now --force
 
       - name: Commit Updated Excel Trade Ledger
         uses: stefanzweifel/git-auto-commit-action@v5
