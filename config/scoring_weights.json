@@ -1,0 +1,29 @@
+{
+  "model_version": "v1.0.0",
+  "description": "Baseline calibrated 100-point factor weights for NSE Swing Intelligence",
+  "weights": {
+    "technical_setup": 20.0,
+    "relative_strength": 15.0,
+    "risk_reward": 15.0,
+    "market_regime": 10.0,
+    "volume_delivery": 10.0,
+    "momentum": 10.0,
+    "fundamental_quality": 10.0,
+    "catalyst_news": 5.0,
+    "sector_strength": 5.0
+  },
+  "conviction_thresholds": {
+    "A_plus": 88.0,
+    "A": 80.0,
+    "B_plus": 72.0,
+    "B": 60.0
+  },
+  "hard_limits": {
+    "min_rr_t1": 1.8,
+    "min_rr_t2": 2.5,
+    "max_stop_loss_pct": 8.0,
+    "max_promoter_pledging_pct": 20.0,
+    "max_earnings_gap_sessions": 3,
+    "min_adtv_crores": 5.0
+  }
+}
