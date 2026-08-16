@@ -3,7 +3,7 @@ Unit tests for data providers (NSE Provider, Chartink Provider, Fundamentals, Ne
 """
 
 import asyncio
-from datetime import date
+from datetime import date, datetime, timedelta
 from pathlib import Path
 import pandas as pd
 import pytest
@@ -42,10 +42,32 @@ def test_screener_fundamental_provider(tmp_path: Path):
 def test_news_provider(tmp_path: Path):
     async def _run():
         provider = FinancialNewsProvider(cache_dir=tmp_path)
+        # Uncached feed returns empty list (no fake neutral news fabricated)
+        articles_empty = await provider.fetch_news_feed("TRENT", lookback_days=7)
+        assert len(articles_empty) == 0
+
+        # Cached payload feed returns articles
+        provider.cache_news_payload(
+            "TRENT",
+            announcements=[],
+            articles=[{
+                "symbol": "TRENT",
+                "headline": "Trent Q1 Net Profit up 40%",
+                "summary": "Strong retail sales momentum",
+                "publisher": "Economic Times",
+                "source_tier": 2,
+                "source_url": "https://economictimes.com/trent",
+                "published_at": (datetime.utcnow() - timedelta(days=1)).isoformat(),
+                "sentiment": "POSITIVE",
+                "materiality_score": 0.85,
+                "is_catalyst": True,
+                "catalyst_type": "EARNINGS_ANNOUNCEMENT",
+            }]
+        )
         articles = await provider.fetch_news_feed("TRENT", lookback_days=7)
-        assert len(articles) > 0
+        assert len(articles) == 1
         assert articles[0].symbol == "TRENT"
-        assert articles[0].publisher != ""
+        assert articles[0].publisher == "Economic Times"
 
     asyncio.run(_run())
 

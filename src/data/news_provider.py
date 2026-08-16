@@ -138,19 +138,18 @@ class FinancialNewsProvider(NewsProvider):
             except Exception as e:
                 logger.warning(f"Error parsing news cache for {symbol}: {e}")
 
-        return [
-            NewsArticle(
-                symbol=symbol,
-                headline=f"{symbol} operational performance in recent quarter.",
-                summary="Business updates reflect positive operational momentum without negative regulatory flags.",
-                publisher="Business Standard",
-                source_tier=SourceTier.TIER_2,
-                source_url=f"https://www.business-standard.com/company/{symbol}",
-                published_at=datetime.utcnow() - timedelta(days=2),
-                sentiment=SentimentType.POSITIVE,
-                materiality_score=0.65,
-                is_catalyst=False,
-                catalyst_type=CatalystType.NO_CATALYST,
-                extraction_reasoning="Normal positive corporate updates without binary risk.",
-            )
-        ]
+        return []
+
+    def cache_news_payload(
+        self, symbol: str, announcements: list[dict], articles: list[dict]
+    ) -> None:
+        """Saves announcements and news articles to cache."""
+        symbol = symbol.upper().strip()
+        payload = {
+            "symbol": symbol,
+            "updated_at": datetime.utcnow().isoformat(),
+            "announcements": announcements,
+            "articles": articles,
+        }
+        cache_file = self._get_cache_file(symbol)
+        cache_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")

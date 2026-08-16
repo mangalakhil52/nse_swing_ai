@@ -85,6 +85,9 @@ class NewsIntelligenceAgent(BaseAgent):
         if neg_count > 0:
             risks.append(f"Identified {neg_count} negative press/filing headlines in recent 7-day window.")
 
+        total_items = len(articles) + len(announcements)
+        confidence = round(min(0.95, max(0.50, 0.60 + 0.10 * total_items)), 2)
+
         return AgentOutput(
             agent_name=self.agent_name,
             symbol=symbol,
@@ -92,7 +95,7 @@ class NewsIntelligenceAgent(BaseAgent):
             status=AgentStatus.SUCCESS,
             signal=signal,
             score=round(score, 1),
-            confidence=0.88,
+            confidence=confidence,
             data_freshness=DataFreshness.RECENT,
             metrics={
                 "positive_articles": pos_count,

@@ -229,24 +229,8 @@ class CIOOrchestrator:
             why_trade.append(f"Fundamentals: PAT growth +{pat_g:.1f}% YoY with improving return ratios")
 
         if not trade_levels:
-            cmp = float(df["close"].iloc[-1]) if not df.empty else 100.0
-            trade_levels = TradeLevels(
-                symbol=symbol_meta.symbol,
-                current_market_price=cmp,
-                entry_trigger_price=cmp,
-                stop_loss_price=cmp * 0.93,
-                risk_rupees=cmp * 0.07,
-                risk_percentage=7.0,
-                target_1=cmp * 1.14,
-                target_2=cmp * 1.20,
-                target_3=cmp * 1.32,
-                risk_reward_t1=2.0,
-                risk_reward_t2=2.8,
-                risk_reward_t3=4.5,
-                position_size_shares=10,
-                allocated_capital_rupees=cmp * 10,
-                invalidation_criteria=f"Daily close below ₹{cmp * 0.93:.2f}",
-            )
+            logger.warning(f"[{symbol_meta.symbol}] DISQUALIFIED: Trade construction agent failed to build explicit ATR/pattern-based levels.")
+            return None, {}
 
         rec_id = f"REC-{datetime.utcnow().strftime('%Y%m%d')}-{symbol_meta.symbol}-{uuid.uuid4().hex[:6].upper()}"
 

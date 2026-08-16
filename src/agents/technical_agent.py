@@ -83,8 +83,10 @@ class TechnicalAnalysisAgent(BaseAgent):
         if rvol >= 1.5:
             score += 5.0
 
-        score = min(100.0, max(0.0, score))
-        confidence = 0.92
+        # Calibrated dynamic confidence based on bar history depth and indicator agreement
+        bar_count_factor = min(1.0, len(df) / 100.0)
+        pattern_bonus = 0.12 if (top_pattern and top_pattern.is_matched) else 0.0
+        confidence = round(min(0.98, max(0.40, 0.70 * bar_count_factor + pattern_bonus)), 2)
 
         # Determine signal
         if score >= 75.0:

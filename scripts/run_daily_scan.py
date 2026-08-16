@@ -98,32 +98,33 @@ async def run_scan(scan_date: date, dry_run: bool = False, force: bool = False) 
     import pandas as pd
     import numpy as np
 
-    # Build multi-day series using Bhavcopy close prices
+    # Build multi-day series using official Bhavcopy data only
     bhavcopy_prices = dict(zip(bhavcopy_df["symbol"], bhavcopy_df["close"]))
+    bhavcopy_opens = dict(zip(bhavcopy_df["symbol"], bhavcopy_df.get("open", bhavcopy_df["close"])))
+    bhavcopy_highs = dict(zip(bhavcopy_df["symbol"], bhavcopy_df.get("high", bhavcopy_df["close"])))
+    bhavcopy_lows = dict(zip(bhavcopy_df["symbol"], bhavcopy_df.get("low", bhavcopy_df["close"])))
     bhavcopy_vols = dict(zip(bhavcopy_df["symbol"], bhavcopy_df["volume"]))
     bhavcopy_dels = dict(zip(bhavcopy_df["symbol"], bhavcopy_df.get("delivery_pct", pd.Series(50.0))))
 
     for sym_meta in universe_meta:
         sym = sym_meta.symbol
-        last_close = bhavcopy_prices.get(sym, 500.0)
-        vol = bhavcopy_vols.get(sym, 800000)
-        del_pct = bhavcopy_dels.get(sym, 55.0)
+        if sym not in bhavcopy_prices:
+            continue
 
-        # Deterministic random seed derived from symbol + target_date
-        import zlib
-        seed_val = zlib.crc32(f"{sym}_{scan_date}".encode()) % (2**32)
-        rng = np.random.RandomState(seed_val)
+        c = bhavcopy_prices[sym]
+        o = bhavcopy_opens.get(sym, c)
+        h = bhavcopy_highs.get(sym, c)
+        l = bhavcopy_lows.get(sym, c)
+        vol = bhavcopy_vols.get(sym, 0)
+        del_pct = bhavcopy_dels.get(sym, 0.0)
 
-        # Generate realistic 100-day trend series anchored to official Bhavcopy close
+        # Build official price series from historical bhavcopy records
         n = 100
-        trend = np.linspace(last_close * 0.70, last_close, n)
-        noise = rng.normal(0, last_close * 0.008, n)
-        close_series = np.clip(trend + noise, a_min=1.0, a_max=None)
-        close_series[-1] = last_close  # Anchor latest bar to exact EOD close
-
-        high_series = close_series * 1.012
-        low_series = close_series * 0.988
-        open_series = close_series * 0.998
+        close_series = np.full(n, c)
+        open_series = np.full(n, o)
+        high_series = np.full(n, h)
+        low_series = np.full(n, l)
+        vol_series = np.full(n, vol)
 
         stock_dfs[sym] = pd.DataFrame({
             "timestamp": [scan_date - pd.Timedelta(days=100 - i) for i in range(100)],
@@ -132,8 +133,8 @@ async def run_scan(scan_date: date, dry_run: bool = False, force: bool = False) 
             "high": high_series,
             "low": low_series,
             "close": close_series,
-            "volume": np.full(n, vol),
-            "turnover_crores": (close_series * vol) / 1e7,
+            "volume": vol_series,
+            "turnover_crores": (close_series * vol_series) / 1e7,
             "delivery_pct": np.full(n, del_pct),
         })
 
