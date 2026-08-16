@@ -3,7 +3,7 @@ NSE Market Hours and Calendar Utility Module.
 Handles Indian Standard Time (IST) sessions, pre-market, live market, post-market, and holiday schedules.
 """
 
-from datetime import datetime, time, date
+from datetime import datetime, time, date, timedelta
 
 try:
     from zoneinfo import ZoneInfo
@@ -62,6 +62,21 @@ def is_trading_day(check_date: date | None = None) -> bool:
     return True
 
 
+def get_latest_trading_day(check_date: date | None = None) -> date:
+    """
+    Returns the most recent completed NSE trading day.
+    If check_date is a Saturday, Sunday, or holiday, steps backward to the preceding trading day (e.g. Friday).
+    """
+    if check_date is None:
+        check_date = get_current_ist_datetime().date()
+
+    curr = check_date
+    while not is_trading_day(curr):
+        curr -= timedelta(days=1)
+
+    return curr
+
+
 def is_market_open(dt: datetime | None = None) -> bool:
     """Checks if NSE live trading session is currently active (09:15 to 15:30 IST on trading days)."""
     if dt is None:
@@ -90,5 +105,6 @@ class MarketCalendar:
 
     get_current_ist_datetime = staticmethod(get_current_ist_datetime)
     is_trading_day = staticmethod(is_trading_day)
+    get_latest_trading_day = staticmethod(get_latest_trading_day)
     is_market_open = staticmethod(is_market_open)
     is_eod_scan_ready = staticmethod(is_eod_scan_ready)

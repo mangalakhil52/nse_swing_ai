@@ -57,7 +57,7 @@ def parse_args() -> argparse.Namespace:
 
 async def execute_daily_5pm_cycle(target_date: date | None = None, force: bool = False) -> int:
     """Executes the complete 5:00 PM automated trading cycle."""
-    target_date = target_date or date.today()
+    target_date = MarketCalendar.get_latest_trading_day(target_date or date.today())
     run_id = f"AUTO-5PM-{target_date.strftime('%Y%m%d')}-{int(datetime.now().timestamp())}"
 
     logger.info(f"{'='*60}")

@@ -217,7 +217,7 @@ def main():
             logger.error(f"Invalid date format: {args.date}. Use YYYY-MM-DD.")
             sys.exit(1)
     else:
-        scan_date = date.today()
+        scan_date = MarketCalendar.get_latest_trading_day(date.today())
 
     exit_code = asyncio.run(run_scan(scan_date, dry_run=args.dry_run, force=args.force))
     sys.exit(exit_code)
