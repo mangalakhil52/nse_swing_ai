@@ -4,9 +4,13 @@ Handles Indian Standard Time (IST) sessions, pre-market, live market, post-marke
 """
 
 from datetime import datetime, time, date
-import pytz
 
-IST = pytz.timezone("Asia/Kolkata")
+try:
+    from zoneinfo import ZoneInfo
+    IST = ZoneInfo("Asia/Kolkata")
+except ImportError:
+    import pytz
+    IST = pytz.timezone("Asia/Kolkata")
 
 # NSE Standard Equity Market Hours (IST)
 PRE_MARKET_OPEN = time(9, 0)
