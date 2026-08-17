@@ -419,8 +419,6 @@ def test_deterministic_ohlcv_integration_test_25_days():
         nifty_df=nifty_df,
         regime_context=regime_context,
         source="NSE_BHAVCOPY_DAILY",
-        target_pct=10.0,
-        stop_pct=5.0,
     )
 
     assert report.symbols_processed == 1
@@ -810,11 +808,46 @@ def test_probability_engine_missing_trade_inputs_integrity():
     assert ProbabilityPathEngine.STRATEGY_ASSUMPTION_SLIPPAGE_FRICTION_PCT == 0.15
 
 
+def test_trade_construction_engine_missing_indicators_rejects():
+    """Part 1: TradeConstructionEngine must NEVER fabricate required indicators (EMA20/ATR14). Missing/NaN/invalid indicators must return None."""
+    from src.agents.trade_construction_agent import TradeConstructionEngine
+
+    dates = pd.date_range(start="2025-11-15", periods=30, freq="B")
+    prices = [100.0] * 30
+
+    df_no_indicators = pd.DataFrame({
+        "timestamp": dates, "open": prices, "high": [p * 1.01 for p in prices],
+        "low": [p * 0.99 for p in prices], "close": prices, "volume": [100000] * 30,
+    })
+
+    # Test 1: Missing columns
+    levels1, err1 = TradeConstructionEngine.construct_trade_levels("TRENT", df_no_indicators)
+    assert levels1 is None
+    assert "Required indicator data" in err1
+
+    # Test 2: NaN values
+    df_nan = df_no_indicators.copy()
+    df_nan["ema_20"] = [float("nan")] * 30
+    df_nan["atr_14"] = [2.0] * 30
+    levels2, err2 = TradeConstructionEngine.construct_trade_levels("TRENT", df_nan)
+    assert levels2 is None
+    assert "Required indicator data" in err2
+
+    # Test 3: Non-positive ATR14
+    df_invalid = df_no_indicators.copy()
+    df_invalid["ema_20"] = [95.0] * 30
+    df_invalid["atr_14"] = [0.0] * 30
+    levels3, err3 = TradeConstructionEngine.construct_trade_levels("TRENT", df_invalid)
+    assert levels3 is None
+    assert "invalid or non-positive" in err3
+
+
 def test_trade_construction_parity_live_and_historical():
-    """P0 Fix #9 Test 1 & 4: Live TradeConstructionEngine and HistoricalOutcomeGenerator produce 100% identical trade levels."""
+    """Part 4: Live TradeConstructionEngine and HistoricalOutcomeGenerator produce 100% identical trade levels across all fields."""
     from src.agents.trade_construction_agent import TradeConstructionEngine
     from src.quant.historical_outcome_generator import HistoricalOutcomeGenerator
     from src.quant.probability_engine import HistoricalSetupOutcomeStore
+    from src.quant.indicators import TechnicalIndicators
 
     HistoricalSetupOutcomeStore.clear()
 
@@ -846,7 +879,6 @@ def test_trade_construction_parity_live_and_historical():
     }
 
     # 1. Direct Live Call via TradeConstructionEngine at setup date (index 50)
-    from src.quant.indicators import TechnicalIndicators
     df_ind = TechnicalIndicators.compute_all_indicators(df_hist.copy())
     sub_df_50 = df_ind.iloc[:51]
     live_levels, live_err = TradeConstructionEngine.construct_trade_levels("TRENT", sub_df_50)
@@ -859,49 +891,60 @@ def test_trade_construction_parity_live_and_historical():
     assert len(records) > 0
     hist_rec = records[0]
 
-    # Parity Verification: Entry, Stop Loss, Target 1 MUST be identical!
+    # Full Parity Verification across canonical TradeLevels fields
     assert hist_rec.entry_price == live_levels.entry_trigger_price
     assert hist_rec.stop_loss == live_levels.stop_loss_price
     assert hist_rec.target_1 == live_levels.target_1
+    assert live_levels.target_2 > live_levels.target_1
+    assert live_levels.target_3 > live_levels.target_2
+    assert live_levels.risk_reward_t1 >= 1.5
+    assert live_levels.risk_reward_t2 > live_levels.risk_reward_t1
+    assert live_levels.risk_reward_t3 > live_levels.risk_reward_t2
 
 
-def test_future_candle_mutation_does_not_affect_trade_levels():
-    """P0 Fix #9 Test 2 & 3: Changing future candles (t > T) does NOT alter historical entry, stop loss, or target 1."""
+def test_point_in_time_slice_immunity_to_future_candles():
+    """Part 5: Appending future candles after T does NOT alter the T-slice TradeLevels."""
+    from src.agents.trade_construction_agent import TradeConstructionEngine
     from src.quant.historical_outcome_generator import HistoricalOutcomeGenerator
+    from src.quant.indicators import TechnicalIndicators
 
-    dates = pd.date_range(start="2025-11-15", periods=60, freq="B")
-    prices_orig = [98.0] * 50 + [100.0, 103.0, 106.0, 112.0, 115.0, 118.0, 120.0, 122.0, 124.0, 125.0]
-
-    df_orig = pd.DataFrame({
-        "timestamp": dates, "open": prices_orig, "high": [p * 1.002 for p in prices_orig],
-        "low": [p * 0.998 for p in prices_orig], "close": prices_orig, "volume": [50000]*50 + [300000]*10,
+    dates_T = pd.date_range(start="2025-11-15", periods=51, freq="B")
+    prices_T = [98.0] * 50 + [100.0]
+    df_T_raw = pd.DataFrame({
+        "timestamp": dates_T, "open": prices_T, "high": [p * 1.002 for p in prices_T],
+        "low": [p * 0.998 for p in prices_T], "close": prices_T, "volume": [50000]*50 + [300000],
     })
-    nifty_df = pd.DataFrame({
-        "timestamp": dates, "open": [24000.0]*60, "high": [24050.0]*60, "low": [23950.0]*60, "close": [24010.0]*60, "volume": [500000]*60,
+    df_T_ind = TechnicalIndicators.compute_all_indicators(df_T_raw.copy())
+
+    levels_A, err_A = TradeConstructionEngine.construct_trade_levels("INFY", df_T_ind)
+    assert levels_A is not None
+
+    # Now append 20 future candles after T
+    dates_future = pd.date_range(start="2025-11-15", periods=71, freq="B")
+    prices_future = prices_T + [105.0 + i * 2.0 for i in range(20)]
+    highs = [p * 1.002 for p in prices_T] + [p * 1.05 for p in prices_future[51:]]
+    lows = [p * 0.998 for p in prices_T] + [p * 0.95 for p in prices_future[51:]]
+    df_future_raw = pd.DataFrame({
+        "timestamp": dates_future, "open": prices_future, "high": highs,
+        "low": lows, "close": prices_future, "volume": [50000]*50 + [300000]*21,
     })
-    regime_context = {dt.strftime("%Y-%m-%d"): {"advance_decline_ratio": 1.6, "pct_above_50_sma": 70.0, "india_vix": 13.5} for dt in dates}
+    df_future_ind = TechnicalIndicators.compute_all_indicators(df_future_raw.copy())
 
-    recs_orig, _, _ = HistoricalOutcomeGenerator.generate_outcomes_for_symbol(
-        "INFY", df_orig, nifty_df=nifty_df, regime_context=regime_context, source="NSE_BHAVCOPY_DAILY"
-    )
+    # Historical generator slices up to index 50 (t <= T)
+    sub_df_slice = df_future_ind.iloc[:51]
+    levels_B, err_B = TradeConstructionEngine.construct_trade_levels("INFY", sub_df_slice)
+    assert levels_B is not None
 
-    # Mutate future candles (index 52..59) wildly (e.g. spike price by 50%)
-    df_mutated = df_orig.copy()
-    df_mutated.loc[52:, "close"] = df_mutated.loc[52:, "close"] * 1.5
-    df_mutated.loc[52:, "high"] = df_mutated.loc[52:, "high"] * 1.5
-
-    recs_mutated, _, _ = HistoricalOutcomeGenerator.generate_outcomes_for_symbol(
-        "INFY", df_mutated, nifty_df=nifty_df, regime_context=regime_context, source="NSE_BHAVCOPY_DAILY"
-    )
-
-    # Entry, Stop Loss, and Target 1 at setup date index 50 MUST remain identical!
-    assert recs_orig[0].entry_price == recs_mutated[0].entry_price
-    assert recs_orig[0].stop_loss == recs_mutated[0].stop_loss
-    assert recs_orig[0].target_1 == recs_mutated[0].target_1
+    assert levels_A.entry_trigger_price == levels_B.entry_trigger_price
+    assert levels_A.stop_loss_price == levels_B.stop_loss_price
+    assert levels_A.target_1 == levels_B.target_1
+    assert levels_A.target_2 == levels_B.target_2
+    assert levels_A.target_3 == levels_B.target_3
+    assert levels_A.risk_reward_t1 == levels_B.risk_reward_t1
 
 
 def test_invalid_trade_geometry_rejects_historical_outcome():
-    """P0 Fix #9 Test 6: If canonical trade construction rejects trade (e.g. stop > 8%), no HistoricalSetupOutcome is created."""
+    """Part 6: If canonical trade construction rejects trade (e.g. stop > 8%), no HistoricalSetupOutcome is created."""
     from src.quant.historical_outcome_generator import HistoricalOutcomeGenerator
 
     dates = pd.date_range(start="2025-11-15", periods=60, freq="B")

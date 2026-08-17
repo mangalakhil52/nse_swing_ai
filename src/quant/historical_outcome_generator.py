@@ -9,8 +9,9 @@ Enforces P0 Parity & Regime Integrity:
   1. ZERO hardcoded trade level formulas (uses canonical TradeConstructionEngine for 100% parity with live trading).
   2. ZERO hardcoded market observation values (no 1.2, 60.0, 15.0).
   3. ZERO default BULL regime initializations or caller-supplied fallback overrides.
-  4. Uses real point-in-time NIFTY OHLCV and real historical market regime inputs (t <= setup_date).
-  5. Missing or UNKNOWN historical regime MUST structurally skip outcome registration.
+  4. ZERO dead historical target/stop percentage parameters.
+  5. Uses real point-in-time NIFTY OHLCV and real historical market regime inputs (t <= setup_date).
+  6. Missing or UNKNOWN historical regime MUST structurally skip outcome registration.
 """
 
 from dataclasses import dataclass, field
@@ -54,8 +55,6 @@ class HistoricalOutcomeGenerator:
         nifty_df: pd.DataFrame | None = None,
         regime_context: dict[str, dict[str, float]] | None = None,
         source: str = "NSE_BHAVCOPY_HISTORICAL",
-        target_pct: float = 10.0,
-        stop_pct: float = 5.0,
         max_holding_sessions: int = 25,
     ) -> tuple[list[HistoricalSetupOutcome], int, int]:
         """
@@ -229,8 +228,6 @@ class HistoricalOutcomeGenerator:
         nifty_df: pd.DataFrame | None = None,
         regime_context: dict[str, dict[str, float]] | None = None,
         source: str = "NSE_BHAVCOPY_HISTORICAL",
-        target_pct: float = 10.0,
-        stop_pct: float = 5.0,
         max_holding_sessions: int = 25,
     ) -> GenerationReport:
         """
@@ -252,8 +249,6 @@ class HistoricalOutcomeGenerator:
                 nifty_df=nifty_df,
                 regime_context=regime_context,
                 source=source,
-                target_pct=target_pct,
-                stop_pct=stop_pct,
                 max_holding_sessions=max_holding_sessions,
             )
             report.candles_processed += n_candles

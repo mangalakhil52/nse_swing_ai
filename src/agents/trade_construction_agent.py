@@ -1,11 +1,12 @@
 """
-Trade Construction Specialist Agent Module — Refactored for P1.0, P1.1, P1.2 & P0 Parity.
+Trade Construction Specialist Agent Module — Refactored for P1.0, P1.1, P1.2 & P0 Parity & Indicator Integrity.
 Contains TradeConstructionEngine: Canonical trade level construction implementation for both LIVE and HISTORICAL execution paths.
 Constructs structural trade levels (Entry Trigger, Structural Stop Loss, Market-Structure Resistance Targets, Sizing).
 Does NOT generate bullish alpha (score = 0.0, signal = NEUTRAL).
-Rejects trade if structural stop is too wide (> 8%) or if resistance occurs before 1.5R.
+Rejects trade if structural stop is too wide (> 8%), if resistance occurs before 1.5R, or if required indicators are missing/invalid.
 """
 
+import math
 from typing import Any
 import pandas as pd
 
@@ -35,16 +36,31 @@ class TradeConstructionEngine:
         Calculates canonical structural trade levels from an OHLCV DataFrame slice.
         Returns (TradeLevels, None) on success, or (None, rejection_reason) on failure.
         Guarantees point-in-time safety when df is sliced up to setup_date (t <= T).
+        Strictly requires real EMA20 and ATR14 without synthetic fallbacks.
         """
         if df.empty or len(df) < 20:
             return None, "Insufficient data bars (< 20) for trade level construction."
+
+        # Indicator Integrity Check (Part 1: ZERO synthetic fallbacks for EMA20 or ATR14)
+        if "ema_20" not in df.columns or "atr_14" not in df.columns:
+            return None, "Required indicator data (EMA20 or ATR14) is unavailable."
+
+        ema_20_val = df["ema_20"].iloc[-1]
+        atr_14_val = df["atr_14"].iloc[-1]
+
+        if pd.isnull(ema_20_val) or pd.isnull(atr_14_val):
+            return None, "Required indicator data (EMA20 or ATR14) is unavailable."
+
+        ema_20 = float(ema_20_val)
+        atr = float(atr_14_val)
+
+        if math.isnan(ema_20) or math.isinf(ema_20) or ema_20 <= 0.0 or math.isnan(atr) or math.isinf(atr) or atr <= 0.0:
+            return None, "Required indicator data (EMA20 or ATR14) is invalid or non-positive."
 
         cmp = float(df["close"].iloc[-1])
         high_20 = float(df["high"].tail(20).max())
         high_60 = float(df["high"].tail(60).max())
         low_10 = float(df["low"].tail(10).min())
-        ema_20 = float(df["ema_20"].iloc[-1]) if "ema_20" in df.columns else cmp * 0.96
-        atr = float(df["atr_14"].iloc[-1]) if "atr_14" in df.columns else (df["high"].tail(14).mean() - df["low"].tail(14).mean())
 
         # 1. Entry Trigger (Breakout above recent 20-day high with 0.1% buffer)
         entry_price = round(max(cmp, high_20 * 1.001), 2)
