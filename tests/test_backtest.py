@@ -126,6 +126,64 @@ def test_backtest_exit_date_is_real_timestamp():
     assert not trade.exit_date.isdigit()
 
 
+def test_backtest_entry_signal_direct_call_and_parity():
+    """Requirement 6 & 9: BacktestEngine.backtest_entry_signal constructs canonical trade levels independently."""
+    dates = pd.date_range(start="2025-11-15", periods=60, freq="B")
+    prices = [98.0] * 50 + [100.0, 103.0, 106.0, 112.0, 115.0, 118.0, 120.0, 122.0, 124.0, 125.0]
+    volumes = [50000] * 50 + [300000, 80000, 90000, 120000, 100000, 95000, 90000, 85000, 80000, 75000]
+
+    df_hist = pd.DataFrame({
+        "timestamp": dates,
+        "open": prices,
+        "high": [p * 1.002 for p in prices],
+        "low": [p * 0.998 for p in prices],
+        "close": prices,
+        "volume": volumes,
+    })
+    df_ind = TechnicalIndicators.compute_all_indicators(df_hist.copy())
+
+    # 1. Direct canonical call at entry_idx 50
+    prod_levels, _ = TradeConstructionEngine.construct_trade_levels("TRENT", df_ind.iloc[:51])
+    assert prod_levels is not None
+
+    # 2. Backtest entry signal call
+    trade, err = BacktestEngine.backtest_entry_signal("TRENT", df_ind, 50)
+    assert err is None
+    assert trade is not None
+
+    assert trade.entry_price == prod_levels.entry_trigger_price
+    assert trade.stop_loss == prod_levels.stop_loss_price
+    assert trade.target_1 == prod_levels.target_1
+    assert trade.target_2 == prod_levels.target_2
+    assert trade.target_3 == prod_levels.target_3
+    assert trade.shares == prod_levels.position_size_shares
+
+
+def test_backtest_entry_signal_rejects_deliberate_parity_violation():
+    """Requirement 5 & 10: Supplying deliberate incorrect trade levels causes PARITY_VIOLATION rejection."""
+    dates = pd.date_range(start="2025-11-15", periods=60, freq="B")
+    prices = [98.0] * 50 + [100.0, 103.0, 106.0, 112.0, 115.0, 118.0, 120.0, 122.0, 124.0, 125.0]
+    volumes = [50000] * 50 + [300000, 80000, 90000, 120000, 100000, 95000, 90000, 85000, 80000, 75000]
+
+    df_hist = pd.DataFrame({
+        "timestamp": dates, "open": prices, "high": [p * 1.002 for p in prices],
+        "low": [p * 0.998 for p in prices], "close": prices, "volume": volumes,
+    })
+    df_ind = TechnicalIndicators.compute_all_indicators(df_hist.copy())
+
+    # Pass fake externally supplied trade levels (e.g. entry_price = 999.0 instead of 100.3)
+    fake_supplied = {
+        "entry_price": 999.0,
+        "stop_loss": 900.0,
+        "target_1": 1200.0,
+    }
+
+    trade, err = BacktestEngine.backtest_entry_signal("TRENT", df_ind, 50, supplied_levels=fake_supplied)
+    assert trade is None
+    assert err is not None
+    assert "PARITY_VIOLATION" in err
+
+
 def test_backtest_uses_production_trade_construction_parity():
     """Requirement 1 & 2: Backtest signals match production TradeConstructionEngine 100%."""
     dates = pd.date_range(start="2025-11-15", periods=60, freq="B")

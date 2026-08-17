@@ -1,9 +1,9 @@
 """
-Backtest Engine Module — Refactored for P0 #10 Single-Trade Strategy Parity.
+Backtest Engine Module — Refactored for P0 Correction: Backtest Independent Trade Level Construction & Parity Verification.
 
 Event-driven historical simulation with realistic Indian friction costs,
 gap-through-stop handling, partial target exits, worst-case same-candle conflict resolution,
-and 100% trade construction parity with the live production TradeConstructionEngine.
+and 100% independent trade construction parity with the live production TradeConstructionEngine.
 """
 
 import logging
@@ -64,6 +64,64 @@ class BacktestEngine:
     T1_EXIT_PCT = 0.50  # Exit 50% at Target 1
     T2_EXIT_PCT = 0.30  # Exit 30% at Target 2
     T3_EXIT_PCT = 0.20  # Trail remaining 20% to Target 3
+
+    @classmethod
+    def backtest_entry_signal(
+        cls,
+        symbol: str,
+        ohlcv_df: pd.DataFrame,
+        entry_idx: int,
+        supplied_levels: dict[str, Any] | None = None,
+    ) -> tuple[BacktestTrade | None, str | None]:
+        """
+        Canonical backtest entry point.
+        Independently constructs trade levels from point-in-time slice (df.iloc[:entry_idx + 1])
+        using TradeConstructionEngine.
+        If supplied_levels are passed and differ from canonical levels beyond float tolerance (1e-3),
+        rejects trade with PARITY_VIOLATION.
+        Returns (BacktestTrade, None) on success, or (None, rejection_reason) on failure.
+        """
+        if ohlcv_df is None or len(ohlcv_df) == 0 or entry_idx >= len(ohlcv_df):
+            return None, "Invalid OHLCV DataFrame or entry_idx out of bounds."
+
+        # 1. Point-in-Time slice up to entry_idx ONLY (t <= T)
+        sub_df = ohlcv_df.iloc[: entry_idx + 1]
+
+        # 2. Independently obtain production TradeLevels from TradeConstructionEngine
+        canonical_levels, err = TradeConstructionEngine.construct_trade_levels(symbol, sub_df)
+        if canonical_levels is None:
+            return None, f"Trade construction rejected setup: {err}"
+
+        # 3. Parity Validation against externally supplied trade levels (if provided)
+        if supplied_levels:
+            for field_key, canonical_val in [
+                ("entry_price", canonical_levels.entry_trigger_price),
+                ("stop_loss", canonical_levels.stop_loss_price),
+                ("target_1", canonical_levels.target_1),
+                ("target_2", canonical_levels.target_2),
+                ("target_3", canonical_levels.target_3),
+            ]:
+                if field_key in supplied_levels and supplied_levels[field_key] is not None:
+                    supplied_val = float(supplied_levels[field_key])
+                    if abs(supplied_val - canonical_val) > 1e-3:
+                        return None, (
+                            f"PARITY_VIOLATION: Externally supplied {field_key} ({supplied_val}) "
+                            f"differs from canonical TradeConstructionEngine value ({canonical_val})."
+                        )
+
+        # 4. Simulate trade evolution using strictly canonical trade levels
+        trade = cls.simulate_trade(
+            symbol=symbol,
+            df=ohlcv_df,
+            entry_date_idx=entry_idx,
+            entry_price=canonical_levels.entry_trigger_price,
+            stop_loss=canonical_levels.stop_loss_price,
+            target_1=canonical_levels.target_1,
+            target_2=canonical_levels.target_2,
+            target_3=canonical_levels.target_3,
+            shares=canonical_levels.position_size_shares,
+        )
+        return trade, None
 
     @classmethod
     def simulate_trade(
@@ -218,7 +276,7 @@ class BacktestEngine:
     ) -> BacktestResult:
         """
         Runs batch backtest over identified entry signals.
-        signal_df must contain columns: ['entry_idx', 'entry_price', 'stop_loss', 'target_1', 'target_2', 'target_3', 'shares']
+        Independently constructs canonical trade levels for each signal and validates parity.
         """
         trades: list[BacktestTrade] = []
 
@@ -227,18 +285,17 @@ class BacktestEngine:
             if entry_idx >= len(ohlcv_df) - 2:
                 continue
 
-            trade = cls.simulate_trade(
+            supplied = sig.to_dict()
+            trade, err = cls.backtest_entry_signal(
                 symbol=symbol,
-                df=ohlcv_df,
-                entry_date_idx=entry_idx,
-                entry_price=float(sig["entry_price"]),
-                stop_loss=float(sig["stop_loss"]),
-                target_1=float(sig["target_1"]),
-                target_2=float(sig["target_2"]),
-                target_3=float(sig["target_3"]),
-                shares=int(sig["shares"]),
+                ohlcv_df=ohlcv_df,
+                entry_idx=entry_idx,
+                supplied_levels=supplied,
             )
-            trades.append(trade)
+            if trade is not None:
+                trades.append(trade)
+            else:
+                logger.warning(f"[{symbol}] Backtest trade at bar {entry_idx} rejected: {err}")
 
         return cls._compute_stats(trades)
 
