@@ -307,8 +307,25 @@ def test_historical_outcome_generator_pipeline():
         "turnover_crores": [10.0] * 100,
     })
 
+    nifty_df = pd.DataFrame({
+        "timestamp": dates,
+        "open": [24000.0 + i * 10 for i in range(100)],
+        "high": [24050.0 + i * 10 for i in range(100)],
+        "low": [23950.0 + i * 10 for i in range(100)],
+        "close": [24010.0 + i * 10 for i in range(100)],
+        "volume": [500000] * 100,
+    })
+    regime_context = {
+        dt.strftime("%Y-%m-%d"): {
+            "advance_decline_ratio": 1.6,
+            "pct_above_50_sma": 70.0,
+            "india_vix": 13.5,
+        }
+        for dt in dates
+    }
+
     records, n_candles, n_setups = HistoricalOutcomeGenerator.generate_outcomes_for_symbol(
-        symbol="RELIANCE", df_hist=df_hist, default_regime_if_missing=MarketRegime.BULL, source="NSE_BHAVCOPY_DAILY"
+        symbol="RELIANCE", df_hist=df_hist, nifty_df=nifty_df, regime_context=regime_context, source="NSE_BHAVCOPY_DAILY"
     )
     assert len(records) > 0  # Real outcomes generated
 
@@ -470,21 +487,54 @@ def test_outcome_generator_idempotency_duplicate_prevention():
         "close": prices, "volume": [50000] * 50 + [300000] * 10, "turnover_crores": [10.0] * 60,
     })
 
+    nifty_df = pd.DataFrame({
+        "timestamp": dates,
+        "open": [24000.0 + i * 10 for i in range(60)],
+        "high": [24050.0 + i * 10 for i in range(60)],
+        "low": [23950.0 + i * 10 for i in range(60)],
+        "close": [24010.0 + i * 10 for i in range(60)],
+        "volume": [500000] * 60,
+    })
+    regime_context = {
+        dt.strftime("%Y-%m-%d"): {
+            "advance_decline_ratio": 1.6,
+            "pct_above_50_sma": 70.0,
+            "india_vix": 13.5,
+        }
+        for dt in dates
+    }
+
     report1 = HistoricalOutcomeGenerator.generate_outcomes(
-        ["INFY"], {"INFY": df_hist}, default_regime_if_missing=MarketRegime.BULL, source="NSE_BHAVCOPY_DAILY"
+        ["INFY"], {"INFY": df_hist}, nifty_df=nifty_df, regime_context=regime_context, source="NSE_BHAVCOPY_DAILY"
     )
     count1 = len(HistoricalSetupOutcomeStore._records)
     assert count1 > 0
 
     # Run second time
     report2 = HistoricalOutcomeGenerator.generate_outcomes(
-        ["INFY"], {"INFY": df_hist}, default_regime_if_missing=MarketRegime.BULL, source="NSE_BHAVCOPY_DAILY"
+        ["INFY"], {"INFY": df_hist}, nifty_df=nifty_df, regime_context=regime_context, source="NSE_BHAVCOPY_DAILY"
     )
     count2 = len(HistoricalSetupOutcomeStore._records)
 
     # Must be strictly equal to count1 (zero duplicate additions)
     assert count2 == count1
     assert report2.outcomes_generated == 0
+
+
+def test_historical_outcome_generator_no_default_regime_parameter_regression():
+    """Regression test proving HistoricalOutcomeGenerator has NO default_regime_if_missing parameter and rejects fallback overrides."""
+    import inspect
+    from src.quant.historical_outcome_generator import HistoricalOutcomeGenerator
+
+    # 1. Inspect function signatures
+    sig1 = inspect.signature(HistoricalOutcomeGenerator.generate_outcomes_for_symbol)
+    assert "default_regime_if_missing" not in sig1.parameters
+
+    sig2 = inspect.signature(HistoricalOutcomeGenerator.generate_outcomes)
+    assert "default_regime_if_missing" not in sig2.parameters
+
+    sig3 = inspect.signature(HistoricalOutcomeGenerator.build_and_register_historical_outcomes)
+    assert "default_regime_if_missing" not in sig3.parameters
 
 
 def test_outcome_generator_record_validation_rejection():

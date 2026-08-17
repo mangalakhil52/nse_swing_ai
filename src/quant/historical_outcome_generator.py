@@ -7,9 +7,9 @@ and registers verified outcomes into HistoricalSetupOutcomeStore.
 
 Enforces P0 Regime Integrity:
   1. ZERO hardcoded market observation values (no 1.2, 60.0, 15.0).
-  2. ZERO default BULL regime initializations.
+  2. ZERO default BULL regime initializations or caller-supplied fallback overrides.
   3. Uses real point-in-time NIFTY OHLCV and real historical market regime inputs (t <= setup_date).
-  4. If historical regime data is missing or UNKNOWN, skips the setup outcome.
+  4. Missing or UNKNOWN historical regime MUST structurally skip outcome registration.
 """
 
 from dataclasses import dataclass, field
@@ -51,7 +51,6 @@ class HistoricalOutcomeGenerator:
         df_hist: pd.DataFrame,
         nifty_df: pd.DataFrame | None = None,
         regime_context: dict[str, dict[str, float]] | None = None,
-        default_regime_if_missing: MarketRegime | None = None,
         source: str = "NSE_BHAVCOPY_HISTORICAL",
         target_pct: float = 10.0,
         stop_pct: float = 5.0,
@@ -138,9 +137,6 @@ class HistoricalOutcomeGenerator:
                     )
                     regime = reg_res.regime
 
-            if regime == MarketRegime.UNKNOWN and default_regime_if_missing is not None:
-                regime = default_regime_if_missing
-
             # P0 Rule: Missing or UNKNOWN historical regime MUST skip the outcome
             if regime == MarketRegime.UNKNOWN:
                 logger.debug(f"[{symbol}] Skipping setup on {setup_date_str} due to UNKNOWN/missing historical regime.")
@@ -221,7 +217,6 @@ class HistoricalOutcomeGenerator:
         stock_dfs: dict[str, pd.DataFrame],
         nifty_df: pd.DataFrame | None = None,
         regime_context: dict[str, dict[str, float]] | None = None,
-        default_regime_if_missing: MarketRegime | None = None,
         source: str = "NSE_BHAVCOPY_HISTORICAL",
         target_pct: float = 10.0,
         stop_pct: float = 5.0,
@@ -245,7 +240,6 @@ class HistoricalOutcomeGenerator:
                 df_hist=df_hist,
                 nifty_df=nifty_df,
                 regime_context=regime_context,
-                default_regime_if_missing=default_regime_if_missing,
                 source=source,
                 target_pct=target_pct,
                 stop_pct=stop_pct,
