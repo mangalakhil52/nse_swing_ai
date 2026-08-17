@@ -1,18 +1,22 @@
 """
 Empirical Probability-of-Path & Expected Value Engine — src/quant/probability_engine.py
 
-Enforces P0 Fix #9, #10, and #11 Compliance:
+Enforces P0 Compliance:
   1. Complete removal of hardcoded EMPIRICAL_DATA tables and arbitrary percentage adjustments.
   2. Probabilities derived strictly from real historical setup outcomes.
-  3. Minimum sample size (n >= 30) required for CALIBRATED status; returns UNAVAILABLE otherwise.
+  3. Minimum sample size (n >= 30) required for EMPIRICAL status; returns UNAVAILABLE otherwise.
   4. Net Expected Value (Net EV) incorporating slippage and transaction costs.
+  5. Disk persistence for HistoricalSetupOutcomeStore across sessions.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import json
 import logging
+from pathlib import Path
 from typing import Any
 import pandas as pd
 
+from config.settings import settings
 from src.core.types import MarketRegime, PatternType
 
 logger = logging.getLogger(__name__)
@@ -29,16 +33,109 @@ class HistoricalSetupOutcome:
     target_1: float
     t1_hit_before_sl: bool
     holding_sessions: int
+    exit_date: str | None = None
+    mfe: float = 0.0  # Maximum Favorable Excursion (%)
+    mae: float = 0.0  # Maximum Adverse Excursion (%)
+    source: str = "NSE_BHAVCOPY_HISTORICAL"
+
+    @property
+    def outcome(self) -> str:
+        return "WIN" if self.t1_hit_before_sl else "LOSS"
+
+    @property
+    def stop_price(self) -> float:
+        return self.stop_loss
+
+    @property
+    def target_price(self) -> float:
+        return self.target_1
+
+    @property
+    def holding_period(self) -> int:
+        return self.holding_sessions
 
 
 class HistoricalSetupOutcomeStore:
-    """Stores and queries verified historical setup outcomes for empirical probability calculation."""
+    """Stores, persists, and queries verified historical setup outcomes for empirical probability calculation."""
 
     _records: list[HistoricalSetupOutcome] = []
+    _cache_file: Path | None = None
 
     @classmethod
-    def register_outcomes(cls, outcomes: list[HistoricalSetupOutcome]) -> None:
+    def get_cache_file(cls) -> Path:
+        if cls._cache_file is None:
+            cache_dir = settings.CACHE_DIR / "probability"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cls._cache_file = cache_dir / "historical_setup_outcomes.json"
+        return cls._cache_file
+
+    @classmethod
+    def clear(cls) -> None:
+        """Clears in-memory records (useful for testing)."""
+        cls._records.clear()
+
+    @classmethod
+    def load_from_disk(cls) -> None:
+        """Loads verified historical outcomes from persistent JSON cache if present."""
+        fpath = cls.get_cache_file()
+        if fpath.exists():
+            try:
+                data = json.loads(fpath.read_text(encoding="utf-8"))
+                recs = []
+                for item in data:
+                    recs.append(
+                        HistoricalSetupOutcome(
+                            symbol=item["symbol"],
+                            pattern_type=PatternType(item["pattern_type"]),
+                            market_regime=MarketRegime(item["market_regime"]),
+                            setup_date=item["setup_date"],
+                            entry_price=item["entry_price"],
+                            stop_loss=item["stop_loss"],
+                            target_1=item["target_1"],
+                            t1_hit_before_sl=item["t1_hit_before_sl"],
+                            holding_sessions=item.get("holding_sessions", 0),
+                            exit_date=item.get("exit_date"),
+                            mfe=item.get("mfe", 0.0),
+                            mae=item.get("mae", 0.0),
+                            source=item.get("source", "NSE_BHAVCOPY_HISTORICAL"),
+                        )
+                    )
+                cls._records = recs
+                logger.info(f"Loaded {len(cls._records)} empirical historical setup outcomes from persistent store.")
+            except Exception as e:
+                logger.warning(f"Failed to load historical outcomes store from disk: {e}")
+
+    @classmethod
+    def persist_to_disk(cls) -> None:
+        """Persists stored historical setup outcomes to disk."""
+        fpath = cls.get_cache_file()
+        try:
+            items = []
+            for r in cls._records:
+                items.append({
+                    "symbol": r.symbol,
+                    "pattern_type": r.pattern_type.value,
+                    "market_regime": r.market_regime.value,
+                    "setup_date": r.setup_date,
+                    "entry_price": r.entry_price,
+                    "stop_loss": r.stop_loss,
+                    "target_1": r.target_1,
+                    "t1_hit_before_sl": r.t1_hit_before_sl,
+                    "holding_sessions": r.holding_sessions,
+                    "exit_date": r.exit_date,
+                    "mfe": r.mfe,
+                    "mae": r.mae,
+                    "source": r.source,
+                })
+            fpath.write_text(json.dumps(items, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.warning(f"Failed to persist historical outcomes store to disk: {e}")
+
+    @classmethod
+    def register_outcomes(cls, outcomes: list[HistoricalSetupOutcome], persist: bool = True) -> None:
         cls._records.extend(outcomes)
+        if persist:
+            cls.persist_to_disk()
 
     @classmethod
     def query_outcomes(
@@ -101,6 +198,10 @@ class ProbabilityPathEngine:
                 is_ev_positive=False,
                 disqualification_reason="UNAVAILABLE: Technical pattern is UNKNOWN or unstructured. Long trades blocked.",
             )
+
+        # Ensure persistent store is loaded
+        if not HistoricalSetupOutcomeStore._records:
+            HistoricalSetupOutcomeStore.load_from_disk()
 
         # Query empirical historical observations matching pattern & regime
         outcomes = HistoricalSetupOutcomeStore.query_outcomes(pattern_type, market_regime)

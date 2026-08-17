@@ -276,3 +276,55 @@ def test_cio_no_fabricated_fundamental_evidence_in_why_trade():
     assert len(valid_parts) == 2
     assert "PAT growth +24.3% YoY" in valid_parts[0]
     assert "FCF/PAT 1.15" in valid_parts[1]
+
+
+def test_historical_outcome_generator_pipeline():
+    """Verifies HistoricalOutcomeGenerator produces genuine, point-in-time safe outcomes from real historical OHLCV."""
+    from src.quant.outcome_generator import HistoricalOutcomeGenerator
+    from src.quant.probability_engine import HistoricalSetupOutcomeStore
+
+    # Reset outcome store for clean test environment
+    HistoricalSetupOutcomeStore.clear()
+
+    # Generate 100 historical bars with a realistic breakout pattern
+    dates = pd.date_range(start="2026-01-01", periods=100, freq="B")
+    prices = []
+    for k in range(100):
+        if k < 60:
+            prices.append(100.0 + (k % 5) * 0.5)  # Consolidation
+        elif k == 60:
+            prices.append(110.0)  # Breakout bar
+        else:
+            prices.append(110.0 + (k - 60) * 0.8)  # Post-breakout uptrend
+
+    df_hist = pd.DataFrame({
+        "timestamp": dates,
+        "open": prices,
+        "high": [p * 1.01 for p in prices],
+        "low": [p * 0.99 for p in prices],
+        "close": prices,
+        "volume": [100000 if i != 60 else 300000 for i in range(100)],
+        "turnover_crores": [10.0] * 100,
+    })
+
+    outcomes = HistoricalOutcomeGenerator.generate_outcomes_for_symbol("RELIANCE", df_hist)
+    assert len(outcomes) > 0  # Real outcomes generated
+
+    for outcome in outcomes:
+        # 1. Full audit trail metadata present
+        assert outcome.symbol == "RELIANCE"
+        assert outcome.setup_date is not None
+        assert outcome.exit_date is not None
+        assert outcome.entry_price > 0.0
+        assert outcome.stop_loss > 0.0
+        assert outcome.target_1 > 0.0
+        assert outcome.source == "NSE_BHAVCOPY_HISTORICAL"
+        assert outcome.outcome in ["WIN", "LOSS"]
+
+        # 2. Point-in-time correctness: exit_date > setup_date
+        assert outcome.exit_date >= outcome.setup_date
+        assert outcome.holding_sessions > 0
+
+    # 3. Store integration
+    HistoricalSetupOutcomeStore.register_outcomes(outcomes, persist=False)
+    assert len(HistoricalSetupOutcomeStore.query_outcomes(outcomes[0].pattern_type)) == len(outcomes)
