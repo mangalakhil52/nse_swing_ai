@@ -6,7 +6,7 @@ Enforces P0 Compliance:
   2. Probabilities derived strictly from real historical setup outcomes.
   3. Minimum sample size (n >= 30) required for EMPIRICAL status; returns UNAVAILABLE otherwise.
   4. Net Expected Value (Net EV) incorporating slippage and transaction costs.
-  5. Disk persistence for HistoricalSetupOutcomeStore across sessions.
+  5. Disk persistence & idempotent registration for HistoricalSetupOutcomeStore.
 """
 
 from dataclasses import dataclass, field
@@ -33,10 +33,10 @@ class HistoricalSetupOutcome:
     target_1: float
     t1_hit_before_sl: bool
     holding_sessions: int
-    exit_date: str | None = None
+    exit_date: str
+    source: str
     mfe: float = 0.0  # Maximum Favorable Excursion (%)
     mae: float = 0.0  # Maximum Adverse Excursion (%)
-    source: str = "NSE_BHAVCOPY_HISTORICAL"
 
     @property
     def outcome(self) -> str:
@@ -53,6 +53,36 @@ class HistoricalSetupOutcome:
     @property
     def holding_period(self) -> int:
         return self.holding_sessions
+
+    @property
+    def unique_key(self) -> str:
+        return f"{self.symbol.upper().strip()}:{self.setup_date}:{self.pattern_type.value}"
+
+
+def validate_outcome(outcome: HistoricalSetupOutcome) -> tuple[bool, str | None]:
+    """
+    Validates a HistoricalSetupOutcome record prior to registration.
+    Returns (True, None) if valid, or (False, reason) if invalid.
+    """
+    if not outcome.setup_date or not isinstance(outcome.setup_date, str):
+        return False, "Missing or invalid setup_date"
+    if outcome.entry_price <= 0.0:
+        return False, f"Invalid entry_price ({outcome.entry_price} <= 0)"
+    if outcome.stop_loss <= 0.0:
+        return False, f"Invalid stop_loss ({outcome.stop_loss} <= 0)"
+    if outcome.target_1 <= 0.0:
+        return False, f"Invalid target_1 ({outcome.target_1} <= 0)"
+    if not outcome.exit_date or outcome.exit_date < outcome.setup_date:
+        return False, f"Invalid exit_date ({outcome.exit_date} < setup_date {outcome.setup_date})"
+    if outcome.holding_sessions < 0:
+        return False, f"Invalid holding_sessions ({outcome.holding_sessions} < 0)"
+    if not outcome.source or not outcome.source.strip():
+        return False, "Missing source data provenance"
+    if outcome.pattern_type == PatternType.UNKNOWN:
+        return False, "PatternType cannot be UNKNOWN"
+    if outcome.market_regime == MarketRegime.UNKNOWN:
+        return False, "MarketRegime cannot be UNKNOWN"
+    return True, None
 
 
 class HistoricalSetupOutcomeStore:
@@ -82,24 +112,27 @@ class HistoricalSetupOutcomeStore:
             try:
                 data = json.loads(fpath.read_text(encoding="utf-8"))
                 recs = []
+                existing_keys = set()
                 for item in data:
-                    recs.append(
-                        HistoricalSetupOutcome(
-                            symbol=item["symbol"],
-                            pattern_type=PatternType(item["pattern_type"]),
-                            market_regime=MarketRegime(item["market_regime"]),
-                            setup_date=item["setup_date"],
-                            entry_price=item["entry_price"],
-                            stop_loss=item["stop_loss"],
-                            target_1=item["target_1"],
-                            t1_hit_before_sl=item["t1_hit_before_sl"],
-                            holding_sessions=item.get("holding_sessions", 0),
-                            exit_date=item.get("exit_date"),
-                            mfe=item.get("mfe", 0.0),
-                            mae=item.get("mae", 0.0),
-                            source=item.get("source", "NSE_BHAVCOPY_HISTORICAL"),
-                        )
+                    rec = HistoricalSetupOutcome(
+                        symbol=item["symbol"],
+                        pattern_type=PatternType(item["pattern_type"]),
+                        market_regime=MarketRegime(item["market_regime"]),
+                        setup_date=item["setup_date"],
+                        entry_price=item["entry_price"],
+                        stop_loss=item["stop_loss"],
+                        target_1=item["target_1"],
+                        t1_hit_before_sl=item["t1_hit_before_sl"],
+                        holding_sessions=item.get("holding_sessions", 0),
+                        exit_date=item.get("exit_date", item["setup_date"]),
+                        source=item.get("source", "NSE_BHAVCOPY_DAILY"),
+                        mfe=item.get("mfe", 0.0),
+                        mae=item.get("mae", 0.0),
                     )
+                    is_valid, _ = validate_outcome(rec)
+                    if is_valid and rec.unique_key not in existing_keys:
+                        recs.append(rec)
+                        existing_keys.add(rec.unique_key)
                 cls._records = recs
                 logger.info(f"Loaded {len(cls._records)} empirical historical setup outcomes from persistent store.")
             except Exception as e:
@@ -123,19 +156,43 @@ class HistoricalSetupOutcomeStore:
                     "t1_hit_before_sl": r.t1_hit_before_sl,
                     "holding_sessions": r.holding_sessions,
                     "exit_date": r.exit_date,
+                    "source": r.source,
                     "mfe": r.mfe,
                     "mae": r.mae,
-                    "source": r.source,
                 })
             fpath.write_text(json.dumps(items, indent=2), encoding="utf-8")
         except Exception as e:
             logger.warning(f"Failed to persist historical outcomes store to disk: {e}")
 
     @classmethod
-    def register_outcomes(cls, outcomes: list[HistoricalSetupOutcome], persist: bool = True) -> None:
-        cls._records.extend(outcomes)
-        if persist:
+    def register_outcomes(cls, outcomes: list[HistoricalSetupOutcome], persist: bool = True) -> tuple[int, int]:
+        """
+        Idempotently validates and registers historical setup outcomes.
+        Returns (registered_count, rejected_count).
+        """
+        existing_keys = {r.unique_key for r in cls._records}
+        added_count = 0
+        rejected_count = 0
+
+        for r in outcomes:
+            is_valid, reason = validate_outcome(r)
+            if not is_valid:
+                logger.debug(f"Rejected HistoricalSetupOutcome for {r.symbol} on {r.setup_date}: {reason}")
+                rejected_count += 1
+                continue
+
+            if r.unique_key in existing_keys:
+                # Skip duplicate
+                continue
+
+            cls._records.append(r)
+            existing_keys.add(r.unique_key)
+            added_count += 1
+
+        if added_count > 0 and persist:
             cls.persist_to_disk()
+
+        return added_count, rejected_count
 
     @classmethod
     def query_outcomes(

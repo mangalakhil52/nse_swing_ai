@@ -165,10 +165,12 @@ def test_probability_path_engine():
             target_1=110.0,
             t1_hit_before_sl=(i < 28),  # 28 wins out of 40 = 70% win rate
             holding_sessions=5,
+            exit_date="2026-01-08",
+            source="NSE_BHAVCOPY_DAILY",
         )
         for i in range(40)
     ]
-    HistoricalSetupOutcomeStore.register_outcomes(outcomes)
+    HistoricalSetupOutcomeStore.register_outcomes(outcomes, persist=False)
 
     res = ProbabilityPathEngine.evaluate_expectancy(
         pattern_type=PatternType.VOLATILITY_CONTRACTION_PATTERN,

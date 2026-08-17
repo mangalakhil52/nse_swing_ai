@@ -307,10 +307,12 @@ def test_historical_outcome_generator_pipeline():
         "turnover_crores": [10.0] * 100,
     })
 
-    outcomes = HistoricalOutcomeGenerator.generate_outcomes_for_symbol("RELIANCE", df_hist)
-    assert len(outcomes) > 0  # Real outcomes generated
+    records, n_candles, n_setups = HistoricalOutcomeGenerator.generate_outcomes_for_symbol(
+        symbol="RELIANCE", df_hist=df_hist, source="NSE_BHAVCOPY_DAILY"
+    )
+    assert len(records) > 0  # Real outcomes generated
 
-    for outcome in outcomes:
+    for outcome in records:
         # 1. Full audit trail metadata present
         assert outcome.symbol == "RELIANCE"
         assert outcome.setup_date is not None
@@ -318,13 +320,184 @@ def test_historical_outcome_generator_pipeline():
         assert outcome.entry_price > 0.0
         assert outcome.stop_loss > 0.0
         assert outcome.target_1 > 0.0
-        assert outcome.source == "NSE_BHAVCOPY_HISTORICAL"
+        assert outcome.source == "NSE_BHAVCOPY_DAILY"
         assert outcome.outcome in ["WIN", "LOSS"]
 
-        # 2. Point-in-time correctness: exit_date > setup_date
+        # 2. Point-in-time correctness: exit_date >= setup_date
         assert outcome.exit_date >= outcome.setup_date
         assert outcome.holding_sessions > 0
 
     # 3. Store integration
+    added, rejected = HistoricalSetupOutcomeStore.register_outcomes(records, persist=False)
+    assert added > 0
+    assert len(HistoricalSetupOutcomeStore.query_outcomes(records[0].pattern_type)) == added
+
+
+def test_deterministic_ohlcv_integration_test_25_days():
+    """Requirement 15: Handcrafted 25-day sequential candles integration test. Proves end-to-end outcome generation from OHLCV."""
+    from src.quant.outcome_generator import HistoricalOutcomeGenerator
+    from src.quant.probability_engine import HistoricalSetupOutcomeStore
+
+    HistoricalSetupOutcomeStore.clear()
+
+    # Day 1-20: Consolidation setup forms
+    # Day 21 (index 50, setup_date = 2026-01-29): Breakout entry (close = 100.0, volume = 300000)
+    # Day 22-23: Price rises
+    # Day 24 (index 53, exit_date = 2026-02-03): Target 1 (110.0) reached!
+    dates = pd.date_range(start="2025-11-15", periods=60, freq="B")
+    prices = [90.0] * 50 + [100.0, 103.0, 106.0, 112.0, 115.0, 118.0, 120.0, 122.0, 124.0, 125.0]
+    volumes = [50000] * 50 + [300000, 80000, 90000, 120000, 100000, 95000, 90000, 85000, 80000, 75000]
+
+    df_hist = pd.DataFrame({
+        "timestamp": dates,
+        "open": [p * 0.99 for p in prices],
+        "high": [p * 1.01 for p in prices],
+        "low": [p * 0.98 for p in prices],
+        "close": prices,
+        "volume": volumes,
+        "turnover_crores": [10.0] * 60,
+    })
+
+    report = HistoricalOutcomeGenerator.generate_outcomes(
+        symbols=["TRENT"],
+        stock_dfs={"TRENT": df_hist},
+        source="NSE_BHAVCOPY_DAILY",
+        target_pct=10.0,
+        stop_pct=5.0,
+    )
+
+    assert report.symbols_processed == 1
+    assert report.setups_detected >= 1
+    assert report.outcomes_generated >= 1
+
+    stored = HistoricalSetupOutcomeStore.query_outcomes(PatternType.CUP_AND_HANDLE)
+    if not stored:
+        stored = HistoricalSetupOutcomeStore.query_outcomes(PatternType.VOLATILITY_CONTRACTION_PATTERN)
+
+    assert len(stored) >= 1
+    sample_rec = stored[0]
+
+    # Verify exact required fields
+    assert sample_rec.symbol == "TRENT"
+    assert sample_rec.setup_date == dates[50].strftime("%Y-%m-%d")
+    assert sample_rec.entry_price == 100.0
+    assert sample_rec.stop_loss == 95.0
+    assert sample_rec.target_1 == 110.0
+    assert sample_rec.t1_hit_before_sl is True
+    assert sample_rec.exit_date > sample_rec.setup_date
+    assert sample_rec.holding_sessions > 0
+    assert sample_rec.mfe >= 10.0
+    assert sample_rec.source == "NSE_BHAVCOPY_DAILY"
+
+
+def test_outcome_generator_idempotency_duplicate_prevention():
+    """Requirement 13: Running generator twice must NOT duplicate the same historical observation."""
+    from src.quant.outcome_generator import HistoricalOutcomeGenerator
+    from src.quant.probability_engine import HistoricalSetupOutcomeStore
+
+    HistoricalSetupOutcomeStore.clear()
+
+    dates = pd.date_range(start="2025-11-15", periods=60, freq="B")
+    prices = [90.0] * 50 + [100.0, 103.0, 106.0, 112.0, 115.0, 118.0, 120.0, 122.0, 124.0, 125.0]
+
+    df_hist = pd.DataFrame({
+        "timestamp": dates,
+        "open": prices, "high": [p * 1.01 for p in prices], "low": [p * 0.98 for p in prices],
+        "close": prices, "volume": [50000] * 50 + [300000] * 10, "turnover_crores": [10.0] * 60,
+    })
+
+    report1 = HistoricalOutcomeGenerator.generate_outcomes(["INFY"], {"INFY": df_hist}, source="NSE_BHAVCOPY_DAILY")
+    count1 = len(HistoricalSetupOutcomeStore._records)
+    assert count1 > 0
+
+    # Run second time
+    report2 = HistoricalOutcomeGenerator.generate_outcomes(["INFY"], {"INFY": df_hist}, source="NSE_BHAVCOPY_DAILY")
+    count2 = len(HistoricalSetupOutcomeStore._records)
+
+    # Must be strictly equal to count1 (zero duplicate additions)
+    assert count2 == count1
+    assert report2.outcomes_generated == 0
+
+
+def test_outcome_generator_record_validation_rejection():
+    """Requirement 10: Reject invalid records (missing date, price <= 0, exit_date < setup_date, missing source, UNKNOWN pattern/regime)."""
+    from src.quant.probability_engine import HistoricalSetupOutcome, HistoricalSetupOutcomeStore, validate_outcome
+
+    rec_invalid_price = HistoricalSetupOutcome(
+        symbol="ABC", pattern_type=PatternType.CUP_AND_HANDLE, market_regime=MarketRegime.BULL,
+        setup_date="2026-01-01", entry_price=0.0, stop_loss=95.0, target_1=110.0,
+        t1_hit_before_sl=True, holding_sessions=3, exit_date="2026-01-05", source="NSE_BHAVCOPY_DAILY"
+    )
+    is_valid, reason = validate_outcome(rec_invalid_price)
+    assert is_valid is False
+    assert "entry_price" in reason
+
+    rec_invalid_exit = HistoricalSetupOutcome(
+        symbol="ABC", pattern_type=PatternType.CUP_AND_HANDLE, market_regime=MarketRegime.BULL,
+        setup_date="2026-01-05", entry_price=100.0, stop_loss=95.0, target_1=110.0,
+        t1_hit_before_sl=True, holding_sessions=3, exit_date="2026-01-01", source="NSE_BHAVCOPY_DAILY"
+    )
+    is_valid, reason = validate_outcome(rec_invalid_exit)
+    assert is_valid is False
+    assert "exit_date" in reason
+
+    rec_missing_source = HistoricalSetupOutcome(
+        symbol="ABC", pattern_type=PatternType.CUP_AND_HANDLE, market_regime=MarketRegime.BULL,
+        setup_date="2026-01-01", entry_price=100.0, stop_loss=95.0, target_1=110.0,
+        t1_hit_before_sl=True, holding_sessions=3, exit_date="2026-01-05", source=""
+    )
+    is_valid, reason = validate_outcome(rec_missing_source)
+    assert is_valid is False
+    assert "source" in reason
+
+    rec_unknown_pattern = HistoricalSetupOutcome(
+        symbol="ABC", pattern_type=PatternType.UNKNOWN, market_regime=MarketRegime.BULL,
+        setup_date="2026-01-01", entry_price=100.0, stop_loss=95.0, target_1=110.0,
+        t1_hit_before_sl=True, holding_sessions=3, exit_date="2026-01-05", source="NSE_BHAVCOPY_DAILY"
+    )
+    is_valid, reason = validate_outcome(rec_unknown_pattern)
+    assert is_valid is False
+    assert "PatternType" in reason
+
+    rec_unknown_regime = HistoricalSetupOutcome(
+        symbol="ABC", pattern_type=PatternType.CUP_AND_HANDLE, market_regime=MarketRegime.UNKNOWN,
+        setup_date="2026-01-01", entry_price=100.0, stop_loss=95.0, target_1=110.0,
+        t1_hit_before_sl=True, holding_sessions=3, exit_date="2026-01-05", source="NSE_BHAVCOPY_DAILY"
+    )
+    is_valid, reason = validate_outcome(rec_unknown_regime)
+    assert is_valid is False
+    assert "MarketRegime" in reason
+
+
+def test_insufficient_historical_setups_remains_insufficient_without_inflation():
+    """Requirement 20: 7 genuine setups remains sample_size = 7 without artificial inflation, returning UNAVAILABLE."""
+    from src.quant.probability_engine import HistoricalSetupOutcome, HistoricalSetupOutcomeStore, ProbabilityPathEngine
+
+    HistoricalSetupOutcomeStore.clear()
+
+    # Register only 7 genuine outcomes
+    outcomes = []
+    for i in range(7):
+        outcomes.append(
+            HistoricalSetupOutcome(
+                symbol=f"SYM_{i}",
+                pattern_type=PatternType.CUP_AND_HANDLE,
+                market_regime=MarketRegime.BULL,
+                setup_date=f"2026-01-0{i+1}",
+                entry_price=100.0,
+                stop_loss=95.0,
+                target_1=110.0,
+                t1_hit_before_sl=True,
+                holding_sessions=3,
+                exit_date=f"2026-01-0{i+2}",
+                source="NSE_BHAVCOPY_DAILY",
+            )
+        )
     HistoricalSetupOutcomeStore.register_outcomes(outcomes, persist=False)
-    assert len(HistoricalSetupOutcomeStore.query_outcomes(outcomes[0].pattern_type)) == len(outcomes)
+
+    res = ProbabilityPathEngine.evaluate_expectancy(PatternType.CUP_AND_HANDLE, MarketRegime.BULL)
+    assert res.sample_size == 7  # Exactly 7, no artificial inflation to 30!
+    assert res.win_probability is None
+    assert res.confidence_type == "UNAVAILABLE"
+    assert res.is_ev_positive is False
+
