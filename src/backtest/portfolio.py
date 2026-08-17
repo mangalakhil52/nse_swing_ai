@@ -42,6 +42,7 @@ class OpenPosition:
     holding_sessions: int = 0
     max_high: float = 0.0
     min_low: float = 0.0
+    executed_sell_value: float = 0.0
 
     def __post_init__(self):
         if self.remaining_shares == 0:
@@ -235,6 +236,7 @@ class PortfolioBacktestEngine:
                         realized_gain = (pos.target_1 - pos.entry_price) * t1_shares - t1_friction
                         portfolio.realized_pnl += realized_gain
                         pos.realized_pnl_so_far += realized_gain
+                        pos.executed_sell_value += (pos.target_1 * t1_shares)
                         pos.remaining_shares -= t1_shares
                         pos.t1_hit = True
 
@@ -249,6 +251,7 @@ class PortfolioBacktestEngine:
                         realized_gain = (pos.target_2 - pos.entry_price) * t2_shares - t2_friction
                         portfolio.realized_pnl += realized_gain
                         pos.realized_pnl_so_far += realized_gain
+                        pos.executed_sell_value += (pos.target_2 * t2_shares)
                         pos.remaining_shares -= t2_shares
                         pos.t2_hit = True
 
@@ -463,6 +466,7 @@ class PortfolioBacktestEngine:
         final_leg_pnl = (exit_price - pos.entry_price) * rem_shares - pos.entry_cost - exit_cost
         pos.realized_pnl_so_far += final_leg_pnl
         portfolio.realized_pnl += final_leg_pnl
+        pos.executed_sell_value += (exit_price * rem_shares)
         pos.remaining_shares = 0
 
         # Calculate total round-trip friction costs
@@ -493,5 +497,7 @@ class PortfolioBacktestEngine:
             holding_sessions=pos.holding_sessions,
             max_adverse_excursion_pct=round(mae_pct, 2),
             max_favorable_excursion_pct=round(mfe_pct, 2),
+            executed_buy_value=round(pos.entry_price * pos.shares, 2),
+            executed_sell_value=round(pos.executed_sell_value, 2),
         )
         portfolio.completed_trades.append(completed_trade)

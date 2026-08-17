@@ -310,6 +310,18 @@ class PerformanceAnalyzer:
         risk_free_rate_pct: float,
         ret_metrics: ReturnMetrics,
     ) -> RiskMetrics:
+        """
+        Calculates Sharpe and Sortino ratios using daily portfolio excess returns.
+
+        Formula Conventions:
+          rf_daily = (1 + risk_free_rate_pct / 100)^(1 / 252) - 1
+          daily_excess_return[t] = daily_portfolio_return[t] - rf_daily
+          mean_daily_excess = mean(daily_excess_return)
+
+          Sharpe Ratio = (mean_daily_excess / std(daily_excess_return, ddof=1)) * sqrt(252)
+          Downside Deviation (daily) = sqrt(mean(min(daily_excess_return, 0)^2))
+          Sortino Ratio = (mean_daily_excess / downside_deviation_daily) * sqrt(252)
+        """
         curve = portfolio.equity_curve
         if len(curve) < 2:
             return RiskMetrics(risk_free_rate_pct=risk_free_rate_pct)
@@ -324,24 +336,25 @@ class PerformanceAnalyzer:
         if not daily_returns:
             return RiskMetrics(risk_free_rate_pct=risk_free_rate_pct)
 
+        rf_daily = ((1.0 + (risk_free_rate_pct / 100.0)) ** (1.0 / 252.0)) - 1.0
+        daily_excess = [r - rf_daily for r in daily_returns]
+        mean_daily_excess = float(np.mean(daily_excess))
+
         daily_std = float(np.std(daily_returns, ddof=1)) if len(daily_returns) > 1 else 0.0
         annualized_vol_pct = round(daily_std * np.sqrt(252) * 100.0, 4)
 
-        rf_daily = ((1.0 + (risk_free_rate_pct / 100.0)) ** (1.0 / 252.0)) - 1.0
-        ann_excess_ret_pct = ret_metrics.annualized_return_pct - risk_free_rate_pct
-
-        if annualized_vol_pct > 0.0:
-            sharpe = round(ann_excess_ret_pct / annualized_vol_pct, 4)
+        daily_excess_std = float(np.std(daily_excess, ddof=1)) if len(daily_excess) > 1 else 0.0
+        if daily_excess_std > 0.0:
+            sharpe = round((mean_daily_excess / daily_excess_std) * np.sqrt(252), 4)
         else:
             sharpe = 0.0
 
-        downside_diffs = [min(r - rf_daily, 0.0) for r in daily_returns]
-        downside_sq_sum = sum(d ** 2 for d in downside_diffs)
-        downside_std_daily = np.sqrt(downside_sq_sum / len(daily_returns)) if len(daily_returns) > 0 else 0.0
-        downside_std_pct = downside_std_daily * np.sqrt(252) * 100.0
+        downside_obs = [min(x, 0.0) for x in daily_excess]
+        downside_sq_mean = float(np.mean([d ** 2 for d in downside_obs])) if downside_obs else 0.0
+        daily_downside_dev = np.sqrt(downside_sq_mean)
 
-        if downside_std_pct > 0.0:
-            sortino = round(ann_excess_ret_pct / downside_std_pct, 4)
+        if daily_downside_dev > 0.0:
+            sortino = round((mean_daily_excess / daily_downside_dev) * np.sqrt(252), 4)
         else:
             sortino = 0.0
 
@@ -531,20 +544,32 @@ class PerformanceAnalyzer:
 
     @classmethod
     def _compute_turnover_metrics(cls, portfolio: PortfolioState) -> TurnoverMetrics:
+        """
+        Calculates portfolio turnover based on actual executed buy and sell notionals.
+        Rejected signals contribute ZERO to turnover.
+        Partial exits are counted based on executed sell notional for each leg.
+        """
         completed = portfolio.completed_trades
         open_positions = portfolio.open_positions
 
-        buy_val = sum(t.entry_price * t.shares for t in completed) + sum(pos.entry_price * pos.shares for pos in open_positions.values())
-        sell_val = sum(t.exit_price * t.shares for t in completed)
-        total_turnover = buy_val + sell_val
+        buy_val = sum(
+            t.executed_buy_value if getattr(t, "executed_buy_value", 0.0) > 0.0 else (t.entry_price * t.shares)
+            for t in completed
+        ) + sum(pos.entry_price * pos.shares for pos in open_positions.values())
 
+        sell_val = sum(
+            t.executed_sell_value if getattr(t, "executed_sell_value", 0.0) > 0.0 else ((t.exit_price or t.entry_price) * t.shares)
+            for t in completed
+        ) + sum(pos.executed_sell_value for pos in open_positions.values())
+
+        total_turnover = round(buy_val + sell_val, 2)
         initial = portfolio.initial_capital
         turnover_pct = round((total_turnover / initial) * 100.0, 2) if initial > 0.0 else 0.0
 
         return TurnoverMetrics(
             total_buy_value=round(buy_val, 2),
             total_sell_value=round(sell_val, 2),
-            total_turnover=round(total_turnover, 2),
+            total_turnover=total_turnover,
             turnover_pct=turnover_pct,
         )
 

@@ -37,6 +37,8 @@ class BacktestTrade(BaseModel):
     holding_sessions: int = 0
     max_adverse_excursion_pct: float | None = None
     max_favorable_excursion_pct: float | None = None
+    executed_buy_value: float = 0.0
+    executed_sell_value: float = 0.0
 
 
 class BacktestResult(BaseModel):
