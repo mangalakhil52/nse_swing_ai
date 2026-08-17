@@ -101,3 +101,22 @@ def test_risk_agent_zero_alpha_gatekeeper():
 
     import asyncio
     asyncio.run(_run())
+
+
+def test_historical_provider_raises_data_unavailable_on_insufficient_history():
+    """HistoricalDataProvider must raise DataUnavailableException when genuine bars < min_bars without synthetic duplication."""
+    async def _run():
+        from src.core.exceptions import DataUnavailableException
+        from src.data.historical_provider import HistoricalDataProvider
+
+        provider = HistoricalDataProvider()
+        start = date(2026, 8, 10)
+        end = date(2026, 8, 14)  # Only 5 calendar days
+
+        with pytest.raises(DataUnavailableException) as exc_info:
+            await provider.get_daily_ohlcv("NONEXISTENT_XYZ", start, end, min_bars=50)
+
+        assert "No historical OHLCV records found" in str(exc_info.value) or "Insufficient historical bars" in str(exc_info.value)
+
+    import asyncio
+    asyncio.run(_run())

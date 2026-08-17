@@ -78,6 +78,7 @@ class HistoricalDataProvider:
         # 2. Build multi-day history by scanning all available cached daily bhavcopies
         records = []
         cached_files = sorted(list(self.bhavcopy_dir.glob("sec_bhavdata_full_*.csv")))
+        cached_dates: set[date] = set()
 
         for bhav_file in cached_files:
             try:
@@ -87,6 +88,7 @@ class HistoricalDataProvider:
                 bhav_date = datetime.strptime(date_str, "%d%m%Y").date()
 
                 if start_date <= bhav_date <= end_date:
+                    cached_dates.add(bhav_date)
                     bhav_df = pd.read_csv(bhav_file)
                     bhav_df.columns = [c.strip().upper() for c in bhav_df.columns]
                     sym_col = "SYMBOL" if "SYMBOL" in bhav_df.columns else "symbol"
@@ -119,48 +121,43 @@ class HistoricalDataProvider:
             except Exception as e:
                 logger.debug(f"Error parsing cached file {bhav_file}: {e}")
 
-        # 3. If records from cached bhavcopies are insufficient, attempt loading latest EOD session
-        if len(records) < min_bars:
-            try:
-                latest_df = await self.nse_provider.fetch_bhavcopy_for_date(latest_trading_day)
-                if latest_df is not None and not latest_df.empty:
-                    sym_row = latest_df[latest_df["symbol"].str.strip() == symbol]
-                    if not sym_row.empty:
-                        row = sym_row.iloc[0]
-                        c = float(row["close"])
-                        o = float(row.get("open", c))
-                        h = float(row.get("high", c))
-                        l = float(row.get("low", c))
-                        v = int(row["volume"])
-                        del_pct = float(row.get("delivery_pct", 0.0))
+        # 3. For any missing trading dates in [start_date, end_date], attempt fetching genuine Bhavcopies
+        curr = start_date
+        while curr <= end_date:
+            if is_trading_day(curr) and curr not in cached_dates:
+                try:
+                    bhav_df = await self.nse_provider.fetch_bhavcopy_for_date(curr)
+                    if bhav_df is not None and not bhav_df.empty:
+                        bhav_df.columns = [c.strip().upper() for c in bhav_df.columns]
+                        sym_col = "SYMBOL" if "SYMBOL" in bhav_df.columns else "symbol"
+                        sym_row = bhav_df[bhav_df[sym_col].astype(str).str.strip() == symbol]
+                        if not sym_row.empty:
+                            row = sym_row.iloc[0]
+                            series_type = str(row.get("SERIES", row.get("series", "EQ"))).strip()
+                            if series_type == "EQ":
+                                c_val = float(row.get("CLOSE_PRICE", row.get("close", 0.0)))
+                                o_val = float(row.get("OPEN_PRICE", row.get("open", c_val)))
+                                h_val = float(row.get("HIGH_PRICE", row.get("high", c_val)))
+                                l_val = float(row.get("LOW_PRICE", row.get("low", c_val)))
+                                v_val = int(row.get("TTL_TRD_QNT", row.get("volume", 0)))
+                                t_val = float(row.get("TURNOVER_LACS", 0.0)) / 100.0 if "TURNOVER_LACS" in row else (c_val * v_val) / 1e7
+                                d_val = float(row.get("DELIV_PER", 0.0)) if "DELIV_PER" in row else 0.0
 
-                        # Build genuine multi-bar timeline from confirmed latest Bhavcopy bar
-                        num_bars = max(min_bars, 60)
-                        trading_dates = []
-                        curr = latest_trading_day
-                        while len(trading_dates) < num_bars:
-                            if is_trading_day(curr):
-                                trading_dates.append(curr)
-                            curr -= timedelta(days=1)
-                        trading_dates = sorted(trading_dates)
-
-                        # Single-session confirmed EOD data projection for scanning
-                        rec_list = []
-                        for dt in trading_dates:
-                            rec_list.append({
-                                "timestamp": pd.Timestamp(dt),
-                                "symbol": symbol,
-                                "open": o,
-                                "high": h,
-                                "low": l,
-                                "close": c,
-                                "volume": v,
-                                "turnover_crores": (c * v) / 1e7,
-                                "delivery_pct": del_pct,
-                            })
-                        records = rec_list
-            except Exception as e:
-                logger.debug(f"Error fetching latest bhavcopy for {symbol}: {e}")
+                                if c_val > 0.0 and v_val > 0:
+                                    records.append({
+                                        "timestamp": pd.Timestamp(curr),
+                                        "symbol": symbol,
+                                        "open": o_val,
+                                        "high": h_val,
+                                        "low": l_val,
+                                        "close": c_val,
+                                        "volume": v_val,
+                                        "turnover_crores": t_val,
+                                        "delivery_pct": d_val,
+                                    })
+                except Exception as e:
+                    logger.debug(f"Could not fetch archive Bhavcopy for {curr}: {e}")
+            curr += timedelta(days=1)
 
         if not records:
             raise DataUnavailableException(
