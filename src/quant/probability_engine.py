@@ -228,22 +228,24 @@ class ProbabilityPathResult:
 class ProbabilityPathEngine:
     """Calculates empirical win probability P(Win), sample size, and Net EV from real observations."""
 
-    MIN_SAMPLE_SIZE = 30
+    MIN_SAMPLE_SIZE: int = 30
+    STRATEGY_ASSUMPTION_SLIPPAGE_FRICTION_PCT: float = 0.15
 
     @classmethod
     def evaluate_expectancy(
         cls,
         pattern_type: PatternType,
         market_regime: MarketRegime,
-        mansfield_rs: float = 0.0,
-        target1_pct: float = 10.0,
-        stop_loss_pct: float = 5.0,
+        target1_pct: float | None = None,
+        stop_loss_pct: float | None = None,
+        mansfield_rs: float | None = None,
         fcf_pat_ratio: float | None = None,
-        estimated_slippage_pct: float = 0.15,
+        estimated_slippage_pct: float = STRATEGY_ASSUMPTION_SLIPPAGE_FRICTION_PCT,
     ) -> ProbabilityPathResult:
         """
         Calculates empirical win probability and Net EV from stored historical observations.
-        If pattern or regime is UNKNOWN or sample size < 30, returns UNAVAILABLE without hardcoded guesses.
+        Requires explicit candidate target1_pct, stop_loss_pct, and mansfield_rs without synthetic fallbacks.
+        If inputs or regime are invalid or sample size < 30, returns UNAVAILABLE cleanly.
         """
         if market_regime == MarketRegime.UNKNOWN:
             return ProbabilityPathResult(
@@ -269,6 +271,46 @@ class ProbabilityPathEngine:
                 risk_reward_ratio=0.0,
                 is_ev_positive=False,
                 disqualification_reason="UNAVAILABLE: Technical pattern is UNKNOWN or unstructured. Long trades blocked.",
+            )
+
+        # Validate explicit trade-specific inputs without default substitutions
+        if target1_pct is None or target1_pct <= 0.0:
+            return ProbabilityPathResult(
+                win_probability=None,
+                sample_size=0,
+                confidence_interval="UNAVAILABLE",
+                confidence_type="UNAVAILABLE",
+                gross_ev=0.0,
+                net_ev=0.0,
+                risk_reward_ratio=0.0,
+                is_ev_positive=False,
+                disqualification_reason="UNAVAILABLE: Target 1 percentage is missing or invalid.",
+            )
+
+        if stop_loss_pct is None or stop_loss_pct <= 0.0:
+            return ProbabilityPathResult(
+                win_probability=None,
+                sample_size=0,
+                confidence_interval="UNAVAILABLE",
+                confidence_type="UNAVAILABLE",
+                gross_ev=0.0,
+                net_ev=0.0,
+                risk_reward_ratio=0.0,
+                is_ev_positive=False,
+                disqualification_reason="UNAVAILABLE: Stop loss percentage is missing or invalid.",
+            )
+
+        if mansfield_rs is None:
+            return ProbabilityPathResult(
+                win_probability=None,
+                sample_size=0,
+                confidence_interval="UNAVAILABLE",
+                confidence_type="UNAVAILABLE",
+                gross_ev=0.0,
+                net_ev=0.0,
+                risk_reward_ratio=0.0,
+                is_ev_positive=False,
+                disqualification_reason="UNAVAILABLE: Mansfield RS observation is missing.",
             )
 
         # Ensure persistent store is loaded

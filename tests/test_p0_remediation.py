@@ -136,18 +136,25 @@ def test_no_hardcoded_empirical_probability_table():
     assert not hasattr(ProbabilityPathEngine, "EMPIRICAL_DATA")
 
 
-def test_probability_engine_returns_unavailable_without_empirical_store():
+def test_probability_engine_returns_unavailable_without_empirical_store(tmp_path):
     """Without registered historical outcomes, evaluate_expectancy returns confidence_type = UNAVAILABLE."""
-    res = ProbabilityPathEngine.evaluate_expectancy(
-        pattern_type=PatternType.CUP_AND_HANDLE,
-        market_regime=MarketRegime.BULL,
-        mansfield_rs=10.0,
-        target1_pct=15.0,
-        stop_loss_pct=6.0,
-    )
-    assert res.win_probability is None
-    assert res.confidence_type == "UNAVAILABLE"
-    assert res.is_ev_positive is False
+    from src.quant.probability_engine import HistoricalSetupOutcomeStore, ProbabilityPathEngine
+
+    HistoricalSetupOutcomeStore.clear()
+    HistoricalSetupOutcomeStore._cache_file = tmp_path / "empty_outcomes.json"
+    try:
+        res = ProbabilityPathEngine.evaluate_expectancy(
+            pattern_type=PatternType.CUP_AND_HANDLE,
+            market_regime=MarketRegime.BULL,
+            mansfield_rs=10.0,
+            target1_pct=15.0,
+            stop_loss_pct=6.0,
+        )
+        assert res.win_probability is None
+        assert res.confidence_type == "UNAVAILABLE"
+        assert res.is_ev_positive is False
+    finally:
+        HistoricalSetupOutcomeStore._cache_file = None
 
 
 def test_risk_agent_zero_alpha_gatekeeper():
@@ -613,7 +620,9 @@ def test_insufficient_historical_setups_remains_insufficient_without_inflation()
         )
     HistoricalSetupOutcomeStore.register_outcomes(outcomes, persist=False)
 
-    res = ProbabilityPathEngine.evaluate_expectancy(PatternType.CUP_AND_HANDLE, MarketRegime.BULL)
+    res = ProbabilityPathEngine.evaluate_expectancy(
+        PatternType.CUP_AND_HANDLE, MarketRegime.BULL, target1_pct=10.0, stop_loss_pct=5.0, mansfield_rs=5.0
+    )
     assert res.sample_size == 7  # Exactly 7, no artificial inflation to 30!
     assert res.win_probability is None
     assert res.confidence_type == "UNAVAILABLE"
@@ -648,14 +657,18 @@ def test_probability_engine_strict_regime_filtering_no_silent_broadening():
     HistoricalSetupOutcomeStore.register_outcomes(outcomes_bull_12 + outcomes_bear_100, persist=False)
 
     # Query for BULL regime -> MUST return sample_size=12, win_probability=None, confidence_type="UNAVAILABLE"
-    res_bull = ProbabilityPathEngine.evaluate_expectancy(PatternType.CUP_AND_HANDLE, MarketRegime.BULL)
+    res_bull = ProbabilityPathEngine.evaluate_expectancy(
+        PatternType.CUP_AND_HANDLE, MarketRegime.BULL, target1_pct=10.0, stop_loss_pct=5.0, mansfield_rs=5.0
+    )
     assert res_bull.sample_size == 12  # Strict regime count (does NOT broaden to 112!)
     assert res_bull.win_probability is None
     assert res_bull.confidence_type == "UNAVAILABLE"
     assert "Insufficient regime-specific empirical observations" in res_bull.disqualification_reason
 
     # Query for BEAR regime -> 100 observations >= 30, uses ONLY BEAR observations
-    res_bear = ProbabilityPathEngine.evaluate_expectancy(PatternType.CUP_AND_HANDLE, MarketRegime.BEAR)
+    res_bear = ProbabilityPathEngine.evaluate_expectancy(
+        PatternType.CUP_AND_HANDLE, MarketRegime.BEAR, target1_pct=10.0, stop_loss_pct=5.0, mansfield_rs=5.0
+    )
     assert res_bear.sample_size == 100
     assert res_bear.win_probability == 0.0  # All 100 BEAR were t1_hit_before_sl=False
     assert res_bear.confidence_type == "EMPIRICAL"
@@ -677,7 +690,9 @@ def test_probability_engine_strict_regime_filtering_exact_30_bull():
     ]
     HistoricalSetupOutcomeStore.register_outcomes(outcomes_bull_30, persist=False)
 
-    res = ProbabilityPathEngine.evaluate_expectancy(PatternType.CUP_AND_HANDLE, MarketRegime.BULL)
+    res = ProbabilityPathEngine.evaluate_expectancy(
+        PatternType.CUP_AND_HANDLE, MarketRegime.BULL, target1_pct=10.0, stop_loss_pct=5.0, mansfield_rs=5.0
+    )
     assert res.sample_size == 30
     assert res.win_probability == 0.7  # 21 / 30
     assert res.confidence_type == "EMPIRICAL"
@@ -724,10 +739,76 @@ def test_probability_engine_unknown_regime_fail_closed():
     assert res_unknown_eval.disqualification_reason == "UNAVAILABLE: Market regime is UNKNOWN."
 
     # Test 3: evaluate_expectancy(VCP, BULL) MUST use ONLY BULL observations
-    res_bull_eval = ProbabilityPathEngine.evaluate_expectancy(PatternType.VOLATILITY_CONTRACTION_PATTERN, MarketRegime.BULL)
+    res_bull_eval = ProbabilityPathEngine.evaluate_expectancy(
+        PatternType.VOLATILITY_CONTRACTION_PATTERN, MarketRegime.BULL, target1_pct=10.0, stop_loss_pct=5.0, mansfield_rs=5.0
+    )
     assert res_bull_eval.sample_size == 40
     assert res_bull_eval.win_probability == 1.0
     assert res_bull_eval.confidence_type == "EMPIRICAL"
+
+
+def test_probability_engine_missing_trade_inputs_integrity():
+    """Requirement 12: Add 5 explicit tests for probability/EV engine input integrity."""
+    from src.quant.probability_engine import HistoricalSetupOutcome, HistoricalSetupOutcomeStore, ProbabilityPathEngine
+
+    HistoricalSetupOutcomeStore.clear()
+    outcomes = [
+        HistoricalSetupOutcome(
+            symbol=f"STOCK_{i}", pattern_type=PatternType.CUP_AND_HANDLE, market_regime=MarketRegime.BULL,
+            setup_date="2026-01-01", entry_price=100.0, stop_loss=95.0, target_1=110.0,
+            t1_hit_before_sl=(i < 24), holding_sessions=3, exit_date="2026-01-05", source="NSE_BHAVCOPY_DAILY"
+        )
+        for i in range(40)
+    ]
+    HistoricalSetupOutcomeStore.register_outcomes(outcomes, persist=False)
+
+    # Test 1: missing target1_pct -> EV UNAVAILABLE
+    res1 = ProbabilityPathEngine.evaluate_expectancy(
+        pattern_type=PatternType.CUP_AND_HANDLE, market_regime=MarketRegime.BULL,
+        target1_pct=None, stop_loss_pct=5.0, mansfield_rs=5.0
+    )
+    assert res1.win_probability is None
+    assert res1.confidence_type == "UNAVAILABLE"
+    assert res1.is_ev_positive is False
+    assert "Target 1 percentage is missing" in res1.disqualification_reason
+
+    # Test 2: missing stop_loss_pct -> EV UNAVAILABLE
+    res2 = ProbabilityPathEngine.evaluate_expectancy(
+        pattern_type=PatternType.CUP_AND_HANDLE, market_regime=MarketRegime.BULL,
+        target1_pct=10.0, stop_loss_pct=None, mansfield_rs=5.0
+    )
+    assert res2.win_probability is None
+    assert res2.confidence_type == "UNAVAILABLE"
+    assert res2.is_ev_positive is False
+    assert "Stop loss percentage is missing" in res2.disqualification_reason
+
+    # Test 3: missing Mansfield RS -> no fake 0.0 substitution -> UNAVAILABLE
+    res3 = ProbabilityPathEngine.evaluate_expectancy(
+        pattern_type=PatternType.CUP_AND_HANDLE, market_regime=MarketRegime.BULL,
+        target1_pct=10.0, stop_loss_pct=5.0, mansfield_rs=None
+    )
+    assert res3.win_probability is None
+    assert res3.confidence_type == "UNAVAILABLE"
+    assert res3.is_ev_positive is False
+    assert "Mansfield RS observation is missing" in res3.disqualification_reason
+
+    # Test 4: target1_pct = 10.0, stop_loss_pct = 5.0, mansfield_rs = 5.0 -> existing EV calculation works
+    res4 = ProbabilityPathEngine.evaluate_expectancy(
+        pattern_type=PatternType.CUP_AND_HANDLE, market_regime=MarketRegime.BULL,
+        target1_pct=10.0, stop_loss_pct=5.0, mansfield_rs=5.0
+    )
+    assert res4.confidence_type == "EMPIRICAL"
+    assert res4.win_probability == 0.6  # 24 / 40
+    # Gross EV = 0.6 * 10 - 0.4 * 5 = 6 - 2 = 4.0
+    # Net EV = 4.0 - 0.15 = 3.85
+    assert res4.gross_ev == 4.0
+    assert res4.net_ev == 3.85
+    assert res4.is_ev_positive is True
+
+    # Test 5: estimated slippage remains explicitly classified as a configurable transaction-cost assumption
+    assert hasattr(ProbabilityPathEngine, "STRATEGY_ASSUMPTION_SLIPPAGE_FRICTION_PCT")
+    assert ProbabilityPathEngine.STRATEGY_ASSUMPTION_SLIPPAGE_FRICTION_PCT == 0.15
+
 
 
 

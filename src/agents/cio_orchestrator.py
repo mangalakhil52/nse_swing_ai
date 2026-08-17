@@ -235,7 +235,7 @@ class CIOOrchestrator:
         except ValueError:
             pattern_enum = PatternType.UNKNOWN
 
-        mansfield_rs = rs_out.metrics.get("mansfield_rs", 0.0) if rs_out else 0.0
+        mansfield_rs = rs_out.metrics.get("mansfield_rs") if rs_out else None
         fcf_pat = fund_out.metrics.get("fcf_to_pat") if fund_out else None
 
         prob_res = ProbabilityPathEngine.evaluate_expectancy(
