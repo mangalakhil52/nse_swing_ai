@@ -189,3 +189,37 @@ def test_historical_provider_raises_data_unavailable_on_insufficient_history():
 
     import asyncio
     asyncio.run(_run())
+
+
+def test_cio_rejects_candidate_when_market_regime_is_missing_null_invalid_or_unknown():
+    """CIOOrchestrator must reject candidates when market_regime is missing, null, invalid, or UNKNOWN."""
+    async def _run():
+        from src.agents.cio_orchestrator import CIOOrchestrator
+
+        cio = CIOOrchestrator()
+        meta = SymbolMetadata(symbol="RELIANCE", company_name="Reliance Industries", sector="Energy")
+        prices = [2400.0 + i * 5.0 for i in range(60)]
+        df = pd.DataFrame({
+            "timestamp": pd.date_range(end=date.today(), periods=60, freq="B"),
+            "open": prices, "high": [p * 1.01 for p in prices], "low": [p * 0.99 for p in prices],
+            "close": prices, "volume": [500000] * 60, "turnover_crores": [120.0] * 60,
+        })
+
+        # 1. Missing market_regime
+        rec1, _ = await cio.analyze_candidate(meta, df, "RUN1", context={})
+        assert rec1 is None
+
+        # 2. Null market_regime
+        rec2, _ = await cio.analyze_candidate(meta, df, "RUN2", context={"market_regime": None})
+        assert rec2 is None
+
+        # 3. Invalid market_regime string
+        rec3, _ = await cio.analyze_candidate(meta, df, "RUN3", context={"market_regime": "INVALID_REGIME_NAME"})
+        assert rec3 is None
+
+        # 4. Explicit UNKNOWN market_regime
+        rec4, _ = await cio.analyze_candidate(meta, df, "RUN4", context={"market_regime": MarketRegime.UNKNOWN})
+        assert rec4 is None
+
+    import asyncio
+    asyncio.run(_run())

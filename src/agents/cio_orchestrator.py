@@ -199,7 +199,21 @@ class CIOOrchestrator:
             return None, {}
 
         # Stage 4: Risk Veto Engine
-        market_regime: MarketRegime = context.get("market_regime", MarketRegime.BULL)
+        raw_regime = context.get("market_regime")
+        if isinstance(raw_regime, MarketRegime):
+            market_regime = raw_regime
+        elif isinstance(raw_regime, str):
+            try:
+                market_regime = MarketRegime(raw_regime.upper().strip())
+            except ValueError:
+                market_regime = MarketRegime.UNKNOWN
+        else:
+            market_regime = MarketRegime.UNKNOWN
+
+        if market_regime == MarketRegime.UNKNOWN:
+            logger.info(f"[{symbol}] STATUS = REJECTED | REASON = Market regime is UNKNOWN or missing.")
+            return None, {}
+
         trading_stance: TradingStance = context.get("trading_stance", TradingStance.NORMAL)
 
         veto = RiskVetoEngine.evaluate_candidate(
