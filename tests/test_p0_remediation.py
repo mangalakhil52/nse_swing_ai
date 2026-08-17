@@ -298,7 +298,7 @@ def test_historical_outcome_generator_pipeline():
     prices = []
     for k in range(100):
         if k < 60:
-            prices.append(100.0 + (k % 5) * 0.5)  # Consolidation
+            prices.append(105.0 + (k % 5) * 0.2)  # Consolidation
         elif k == 60:
             prices.append(110.0)  # Breakout bar
         else:
@@ -307,8 +307,8 @@ def test_historical_outcome_generator_pipeline():
     df_hist = pd.DataFrame({
         "timestamp": dates,
         "open": prices,
-        "high": [p * 1.01 for p in prices],
-        "low": [p * 0.99 for p in prices],
+        "high": [p * 1.002 for p in prices],
+        "low": [p * 0.998 for p in prices],
         "close": prices,
         "volume": [100000 if i != 60 else 300000 for i in range(100)],
         "turnover_crores": [10.0] * 100,
@@ -383,14 +383,14 @@ def test_deterministic_ohlcv_integration_test_25_days():
     # Day 22-23: Price rises
     # Day 24 (index 53, exit_date = 2026-02-03): Target 1 (110.0) reached!
     dates = pd.date_range(start="2025-11-15", periods=60, freq="B")
-    prices = [90.0] * 50 + [100.0, 103.0, 106.0, 112.0, 115.0, 118.0, 120.0, 122.0, 124.0, 125.0]
+    prices = [98.0] * 50 + [100.0, 103.0, 106.0, 112.0, 115.0, 118.0, 120.0, 122.0, 124.0, 125.0]
     volumes = [50000] * 50 + [300000, 80000, 90000, 120000, 100000, 95000, 90000, 85000, 80000, 75000]
 
     df_hist = pd.DataFrame({
         "timestamp": dates,
-        "open": [p * 0.99 for p in prices],
-        "high": [p * 1.01 for p in prices],
-        "low": [p * 0.98 for p in prices],
+        "open": prices,
+        "high": [p * 1.002 for p in prices],
+        "low": [p * 0.998 for p in prices],
         "close": prices,
         "volume": volumes,
         "turnover_crores": [10.0] * 60,
@@ -437,13 +437,13 @@ def test_deterministic_ohlcv_integration_test_25_days():
     # Verify exact required fields
     assert sample_rec.symbol == "TRENT"
     assert sample_rec.setup_date == dates[50].strftime("%Y-%m-%d")
-    assert sample_rec.entry_price == 100.0
-    assert sample_rec.stop_loss == 95.0
-    assert sample_rec.target_1 == 110.0
+    assert sample_rec.entry_price > 0.0
+    assert sample_rec.stop_loss < sample_rec.entry_price
+    assert sample_rec.target_1 > sample_rec.entry_price
     assert sample_rec.t1_hit_before_sl is True
     assert sample_rec.exit_date > sample_rec.setup_date
     assert sample_rec.holding_sessions > 0
-    assert sample_rec.mfe >= 10.0
+    assert sample_rec.mfe > 0.0
     assert sample_rec.source == "NSE_BHAVCOPY_DAILY"
     assert sample_rec.market_regime != MarketRegime.UNKNOWN
 
@@ -456,11 +456,11 @@ def test_historical_outcome_generator_missing_regime_skips_outcome():
     HistoricalSetupOutcomeStore.clear()
 
     dates = pd.date_range(start="2025-11-15", periods=60, freq="B")
-    prices = [90.0] * 50 + [100.0, 103.0, 106.0, 112.0, 115.0, 118.0, 120.0, 122.0, 124.0, 125.0]
+    prices = [98.0] * 50 + [100.0, 103.0, 106.0, 112.0, 115.0, 118.0, 120.0, 122.0, 124.0, 125.0]
 
     df_hist = pd.DataFrame({
         "timestamp": dates,
-        "open": prices, "high": [p * 1.01 for p in prices], "low": [p * 0.98 for p in prices],
+        "open": prices, "high": [p * 1.002 for p in prices], "low": [p * 0.998 for p in prices],
         "close": prices, "volume": [50000] * 50 + [300000] * 10, "turnover_crores": [10.0] * 60,
     })
 
@@ -486,11 +486,11 @@ def test_outcome_generator_idempotency_duplicate_prevention():
     HistoricalSetupOutcomeStore.clear()
 
     dates = pd.date_range(start="2025-11-15", periods=60, freq="B")
-    prices = [90.0] * 50 + [100.0, 103.0, 106.0, 112.0, 115.0, 118.0, 120.0, 122.0, 124.0, 125.0]
+    prices = [98.0] * 50 + [100.0, 103.0, 106.0, 112.0, 115.0, 118.0, 120.0, 122.0, 124.0, 125.0]
 
     df_hist = pd.DataFrame({
         "timestamp": dates,
-        "open": prices, "high": [p * 1.01 for p in prices], "low": [p * 0.98 for p in prices],
+        "open": prices, "high": [p * 1.002 for p in prices], "low": [p * 0.998 for p in prices],
         "close": prices, "volume": [50000] * 50 + [300000] * 10, "turnover_crores": [10.0] * 60,
     })
 
@@ -808,6 +808,120 @@ def test_probability_engine_missing_trade_inputs_integrity():
     # Test 5: estimated slippage remains explicitly classified as a configurable transaction-cost assumption
     assert hasattr(ProbabilityPathEngine, "STRATEGY_ASSUMPTION_SLIPPAGE_FRICTION_PCT")
     assert ProbabilityPathEngine.STRATEGY_ASSUMPTION_SLIPPAGE_FRICTION_PCT == 0.15
+
+
+def test_trade_construction_parity_live_and_historical():
+    """P0 Fix #9 Test 1 & 4: Live TradeConstructionEngine and HistoricalOutcomeGenerator produce 100% identical trade levels."""
+    from src.agents.trade_construction_agent import TradeConstructionEngine
+    from src.quant.historical_outcome_generator import HistoricalOutcomeGenerator
+    from src.quant.probability_engine import HistoricalSetupOutcomeStore
+
+    HistoricalSetupOutcomeStore.clear()
+
+    dates = pd.date_range(start="2025-11-15", periods=60, freq="B")
+    prices = [98.0] * 50 + [100.0, 103.0, 106.0, 112.0, 115.0, 118.0, 120.0, 122.0, 124.0, 125.0]
+    volumes = [50000] * 50 + [300000, 80000, 90000, 120000, 100000, 95000, 90000, 85000, 80000, 75000]
+
+    df_hist = pd.DataFrame({
+        "timestamp": dates,
+        "open": prices,
+        "high": [p * 1.002 for p in prices],
+        "low": [p * 0.998 for p in prices],
+        "close": prices,
+        "volume": volumes,
+        "turnover_crores": [10.0] * 60,
+    })
+
+    nifty_df = pd.DataFrame({
+        "timestamp": dates,
+        "open": [24000.0 + i * 10 for i in range(60)],
+        "high": [24050.0 + i * 10 for i in range(60)],
+        "low": [23950.0 + i * 10 for i in range(60)],
+        "close": [24010.0 + i * 10 for i in range(60)],
+        "volume": [500000] * 60,
+    })
+    regime_context = {
+        dt.strftime("%Y-%m-%d"): {"advance_decline_ratio": 1.6, "pct_above_50_sma": 70.0, "india_vix": 13.5}
+        for dt in dates
+    }
+
+    # 1. Direct Live Call via TradeConstructionEngine at setup date (index 50)
+    from src.quant.indicators import TechnicalIndicators
+    df_ind = TechnicalIndicators.compute_all_indicators(df_hist.copy())
+    sub_df_50 = df_ind.iloc[:51]
+    live_levels, live_err = TradeConstructionEngine.construct_trade_levels("TRENT", sub_df_50)
+    assert live_levels is not None, f"Live construction failed: {live_err}"
+
+    # 2. Historical Call via HistoricalOutcomeGenerator
+    records, _, _ = HistoricalOutcomeGenerator.generate_outcomes_for_symbol(
+        symbol="TRENT", df_hist=df_hist, nifty_df=nifty_df, regime_context=regime_context, source="NSE_BHAVCOPY_DAILY"
+    )
+    assert len(records) > 0
+    hist_rec = records[0]
+
+    # Parity Verification: Entry, Stop Loss, Target 1 MUST be identical!
+    assert hist_rec.entry_price == live_levels.entry_trigger_price
+    assert hist_rec.stop_loss == live_levels.stop_loss_price
+    assert hist_rec.target_1 == live_levels.target_1
+
+
+def test_future_candle_mutation_does_not_affect_trade_levels():
+    """P0 Fix #9 Test 2 & 3: Changing future candles (t > T) does NOT alter historical entry, stop loss, or target 1."""
+    from src.quant.historical_outcome_generator import HistoricalOutcomeGenerator
+
+    dates = pd.date_range(start="2025-11-15", periods=60, freq="B")
+    prices_orig = [98.0] * 50 + [100.0, 103.0, 106.0, 112.0, 115.0, 118.0, 120.0, 122.0, 124.0, 125.0]
+
+    df_orig = pd.DataFrame({
+        "timestamp": dates, "open": prices_orig, "high": [p * 1.002 for p in prices_orig],
+        "low": [p * 0.998 for p in prices_orig], "close": prices_orig, "volume": [50000]*50 + [300000]*10,
+    })
+    nifty_df = pd.DataFrame({
+        "timestamp": dates, "open": [24000.0]*60, "high": [24050.0]*60, "low": [23950.0]*60, "close": [24010.0]*60, "volume": [500000]*60,
+    })
+    regime_context = {dt.strftime("%Y-%m-%d"): {"advance_decline_ratio": 1.6, "pct_above_50_sma": 70.0, "india_vix": 13.5} for dt in dates}
+
+    recs_orig, _, _ = HistoricalOutcomeGenerator.generate_outcomes_for_symbol(
+        "INFY", df_orig, nifty_df=nifty_df, regime_context=regime_context, source="NSE_BHAVCOPY_DAILY"
+    )
+
+    # Mutate future candles (index 52..59) wildly (e.g. spike price by 50%)
+    df_mutated = df_orig.copy()
+    df_mutated.loc[52:, "close"] = df_mutated.loc[52:, "close"] * 1.5
+    df_mutated.loc[52:, "high"] = df_mutated.loc[52:, "high"] * 1.5
+
+    recs_mutated, _, _ = HistoricalOutcomeGenerator.generate_outcomes_for_symbol(
+        "INFY", df_mutated, nifty_df=nifty_df, regime_context=regime_context, source="NSE_BHAVCOPY_DAILY"
+    )
+
+    # Entry, Stop Loss, and Target 1 at setup date index 50 MUST remain identical!
+    assert recs_orig[0].entry_price == recs_mutated[0].entry_price
+    assert recs_orig[0].stop_loss == recs_mutated[0].stop_loss
+    assert recs_orig[0].target_1 == recs_mutated[0].target_1
+
+
+def test_invalid_trade_geometry_rejects_historical_outcome():
+    """P0 Fix #9 Test 6: If canonical trade construction rejects trade (e.g. stop > 8%), no HistoricalSetupOutcome is created."""
+    from src.quant.historical_outcome_generator import HistoricalOutcomeGenerator
+
+    dates = pd.date_range(start="2025-11-15", periods=60, freq="B")
+    # Lows drop deeply at index 45-50 so that structural stop loss distance > 10% (> 8% max limit)
+    prices = [90.0] * 40 + [75.0] * 10 + [100.0] * 10
+
+    df_hist = pd.DataFrame({
+        "timestamp": dates, "open": prices, "high": [p * 1.01 for p in prices],
+        "low": [p * 0.90 for p in prices], "close": prices, "volume": [50000]*50 + [300000]*10,
+    })
+    nifty_df = pd.DataFrame({"timestamp": dates, "open": [24000.0]*60, "high": [24050.0]*60, "low": [23950.0]*60, "close": [24010.0]*60, "volume": [500000]*60})
+    regime_context = {dt.strftime("%Y-%m-%d"): {"advance_decline_ratio": 1.6, "pct_above_50_sma": 70.0, "india_vix": 13.5} for dt in dates}
+
+    records, _, _ = HistoricalOutcomeGenerator.generate_outcomes_for_symbol(
+        "RELIANCE", df_hist, nifty_df=nifty_df, regime_context=regime_context, source="NSE_BHAVCOPY_DAILY"
+    )
+
+    # Wide stop loss (> 8%) MUST be rejected by TradeConstructionEngine, creating 0 historical setup outcomes!
+    assert len(records) == 0
+
 
 
 

@@ -2,14 +2,15 @@
 Real Historical Setup Outcome Generator Module — src/quant/historical_outcome_generator.py
 
 Production pipeline component that consumes REAL historical OHLCV data from HistoricalDataProvider,
-detects historical setups point-in-time, simulates forward outcomes chronologically,
-and registers verified outcomes into HistoricalSetupOutcomeStore.
+detects historical setups point-in-time, constructs trade levels using canonical TradeConstructionEngine,
+simulates forward outcomes chronologically, and registers verified outcomes into HistoricalSetupOutcomeStore.
 
-Enforces P0 Regime Integrity:
-  1. ZERO hardcoded market observation values (no 1.2, 60.0, 15.0).
-  2. ZERO default BULL regime initializations or caller-supplied fallback overrides.
-  3. Uses real point-in-time NIFTY OHLCV and real historical market regime inputs (t <= setup_date).
-  4. Missing or UNKNOWN historical regime MUST structurally skip outcome registration.
+Enforces P0 Parity & Regime Integrity:
+  1. ZERO hardcoded trade level formulas (uses canonical TradeConstructionEngine for 100% parity with live trading).
+  2. ZERO hardcoded market observation values (no 1.2, 60.0, 15.0).
+  3. ZERO default BULL regime initializations or caller-supplied fallback overrides.
+  4. Uses real point-in-time NIFTY OHLCV and real historical market regime inputs (t <= setup_date).
+  5. Missing or UNKNOWN historical regime MUST structurally skip outcome registration.
 """
 
 from dataclasses import dataclass, field
@@ -18,6 +19,7 @@ import logging
 from typing import Any
 import pandas as pd
 
+from src.agents.trade_construction_agent import TradeConstructionEngine
 from src.core.types import MarketRegime, PatternType
 from src.data.historical_provider import HistoricalDataProvider
 from src.quant.indicators import TechnicalIndicators
@@ -142,12 +144,21 @@ class HistoricalOutcomeGenerator:
                 logger.debug(f"[{symbol}] Skipping setup on {setup_date_str} due to UNKNOWN/missing historical regime.")
                 continue
 
-            # Trade Level Definitions
-            entry_price = close_p
-            stop_loss = entry_price * (1.0 - stop_pct / 100.0)
-            target_1 = entry_price * (1.0 + target_pct / 100.0)
+            # 3. Canonical Trade Level Construction (Strict Parity with Live Strategy using t <= setup_date)
+            trade_levels, rej_reason = TradeConstructionEngine.construct_trade_levels(
+                symbol=symbol,
+                df=sub_df,
+            )
 
-            # 3. Outcome Simulation (Strictly Forward in Time: t > i)
+            if trade_levels is None:
+                logger.debug(f"[{symbol}] Skipping historical setup on {setup_date_str}: {rej_reason}")
+                continue
+
+            entry_price = trade_levels.entry_trigger_price
+            stop_loss = trade_levels.stop_loss_price
+            target_1 = trade_levels.target_1
+
+            # 4. Outcome Simulation (Strictly Forward in Time: t > i)
             forward_bars = df.iloc[i + 1 : min(i + 1 + max_holding_sessions, n_bars)]
             if forward_bars.empty:
                 continue

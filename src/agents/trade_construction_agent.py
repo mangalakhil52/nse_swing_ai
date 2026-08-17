@@ -1,5 +1,6 @@
 """
-Trade Construction Specialist Agent Module — Refactored for P1.0, P1.1 & P1.2 Compliance.
+Trade Construction Specialist Agent Module — Refactored for P1.0, P1.1, P1.2 & P0 Parity.
+Contains TradeConstructionEngine: Canonical trade level construction implementation for both LIVE and HISTORICAL execution paths.
 Constructs structural trade levels (Entry Trigger, Structural Stop Loss, Market-Structure Resistance Targets, Sizing).
 Does NOT generate bullish alpha (score = 0.0, signal = NEUTRAL).
 Rejects trade if structural stop is too wide (> 8%) or if resistance occurs before 1.5R.
@@ -20,35 +21,23 @@ from src.core.types import AgentStatus, DataFreshness, SignalType
 from src.risk.sizing import PositionSizingEngine
 
 
-class TradeConstructionAgent(BaseAgent):
-    """Specialist agent constructing structural trade levels and position sizing without generating alpha score."""
+class TradeConstructionEngine:
+    """Canonical engine constructing structural trade levels from OHLCV slice (Point-in-Time safe)."""
 
-    def __init__(self):
-        super().__init__(agent_name="trade_construction_agent")
-
-    async def _analyze(
-        self,
-        symbol_meta: SymbolMetadata,
+    @classmethod
+    def construct_trade_levels(
+        cls,
+        symbol: str,
         df: pd.DataFrame,
-        evidence_graph: EvidenceGraph,
-        run_id: str,
-        context: dict[str, Any],
-    ) -> AgentOutput:
-        symbol = symbol_meta.symbol
-        regime_mult: float = context.get("regime_risk_multiplier", 1.0)
-
+        regime_mult: float = 1.0,
+    ) -> tuple[TradeLevels | None, str | None]:
+        """
+        Calculates canonical structural trade levels from an OHLCV DataFrame slice.
+        Returns (TradeLevels, None) on success, or (None, rejection_reason) on failure.
+        Guarantees point-in-time safety when df is sliced up to setup_date (t <= T).
+        """
         if df.empty or len(df) < 20:
-            return AgentOutput(
-                agent_name=self.agent_name,
-                symbol=symbol,
-                run_id=run_id,
-                status=AgentStatus.DATA_UNAVAILABLE,
-                signal=SignalType.NEUTRAL,
-                score=0.0,
-                confidence=None,
-                disqualification_triggered=True,
-                disqualification_reason="Insufficient data bars (< 20) for trade level construction.",
-            )
+            return None, "Insufficient data bars (< 20) for trade level construction."
 
         cmp = float(df["close"].iloc[-1])
         high_20 = float(df["high"].tail(20).max())
@@ -65,33 +54,13 @@ class TradeConstructionAgent(BaseAgent):
         risk_rupees = round(entry_price - structural_stop, 2)
 
         if risk_rupees <= 0.0:
-            return AgentOutput(
-                agent_name=self.agent_name,
-                symbol=symbol,
-                run_id=run_id,
-                status=AgentStatus.SUCCESS,
-                signal=SignalType.NEUTRAL,
-                score=0.0,
-                confidence=None,
-                disqualification_triggered=True,
-                disqualification_reason="Invalid trade geometry: Structural stop is above or equal to entry price.",
-            )
+            return None, "Invalid trade geometry: Structural stop is above or equal to entry price."
 
         risk_pct = round((risk_rupees / entry_price) * 100.0, 2)
 
-        # P1.2: Reject trade if structural stop loss distance exceeds 8.0% (do not distort stop)
+        # P1.2: Reject trade if structural stop loss distance exceeds max limit (8.0%)
         if risk_pct > settings.MAX_STOP_LOSS_PCT:
-            return AgentOutput(
-                agent_name=self.agent_name,
-                symbol=symbol,
-                run_id=run_id,
-                status=AgentStatus.SUCCESS,
-                signal=SignalType.NEUTRAL,
-                score=0.0,
-                confidence=None,
-                disqualification_triggered=True,
-                disqualification_reason=f"Structural stop loss ({risk_pct:.1f}%) exceeds max allowable limit ({settings.MAX_STOP_LOSS_PCT}%). Trade rejected.",
-            )
+            return None, f"Structural stop loss ({risk_pct:.1f}%) exceeds max allowable limit ({settings.MAX_STOP_LOSS_PCT}%). Trade rejected."
 
         # 3. Market-Structure Targets (P1.1: Respect swing highs, resistance, and ATR reaction levels)
         resistance_zone_1 = max(high_60, entry_price + (risk_rupees * 1.5))
@@ -108,17 +77,7 @@ class TradeConstructionAgent(BaseAgent):
 
         # P1.1: If realistic resistance occurs before 1.5R minimum acceptable reward, reject trade
         if rr_t1 < 1.5:
-            return AgentOutput(
-                agent_name=self.agent_name,
-                symbol=symbol,
-                run_id=run_id,
-                status=AgentStatus.SUCCESS,
-                signal=SignalType.NEUTRAL,
-                score=0.0,
-                confidence=None,
-                disqualification_triggered=True,
-                disqualification_reason=f"Insufficient Market-Structure R:R (T1 R:R {rr_t1:.2f} < 1.50 min threshold due to overhead resistance). Trade rejected.",
-            )
+            return None, f"Insufficient Market-Structure R:R (T1 R:R {rr_t1:.2f} < 1.50 min threshold due to overhead resistance). Trade rejected."
 
         # 4. Position Sizing
         sizing = PositionSizingEngine.calculate_position_size(
@@ -146,6 +105,45 @@ class TradeConstructionAgent(BaseAgent):
             allocated_capital_rupees=sizing.total_capital_allocated,
             invalidation_criteria=invalidation,
         )
+        return levels, None
+
+
+class TradeConstructionAgent(BaseAgent):
+    """Specialist agent constructing structural trade levels and position sizing without generating alpha score."""
+
+    def __init__(self):
+        super().__init__(agent_name="trade_construction_agent")
+
+    async def _analyze(
+        self,
+        symbol_meta: SymbolMetadata,
+        df: pd.DataFrame,
+        evidence_graph: EvidenceGraph,
+        run_id: str,
+        context: dict[str, Any],
+    ) -> AgentOutput:
+        symbol = symbol_meta.symbol
+        regime_mult: float = context.get("regime_risk_multiplier", 1.0)
+
+        # Delegate trade level construction to canonical TradeConstructionEngine
+        levels, rejection_reason = TradeConstructionEngine.construct_trade_levels(
+            symbol=symbol,
+            df=df,
+            regime_mult=regime_mult,
+        )
+
+        if levels is None:
+            return AgentOutput(
+                agent_name=self.agent_name,
+                symbol=symbol,
+                run_id=run_id,
+                status=AgentStatus.SUCCESS,
+                signal=SignalType.NEUTRAL,
+                score=0.0,
+                confidence=None,
+                disqualification_triggered=True,
+                disqualification_reason=rejection_reason or "Trade construction failed.",
+            )
 
         # Register Evidence
         evidence_graph.add_evidence(
@@ -153,7 +151,10 @@ class TradeConstructionAgent(BaseAgent):
             agent_name=self.agent_name,
             claim_type="STRUCTURAL_TRADE_GEOMETRY",
             raw_metric="structural_levels",
-            observed_value=f"Entry: ₹{entry_price:.2f} | Structural SL: ₹{structural_stop:.2f} ({risk_pct:.1f}%) | T1: ₹{target_1:.2f} (R:R {rr_t1:.1f}) | Sizing: {sizing.shares} shares",
+            observed_value=(
+                f"Entry: ₹{levels.entry_trigger_price:.2f} | Structural SL: ₹{levels.stop_loss_price:.2f} ({levels.risk_percentage:.1f}%) | "
+                f"T1: ₹{levels.target_1:.2f} (R:R {levels.risk_reward_t1:.1f}) | Sizing: {levels.position_size_shares} shares"
+            ),
             unit="trade_levels",
             source="TRADE_CONSTRUCTION_ENGINE",
             timestamp="EOD",
