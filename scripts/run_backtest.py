@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Backtesting Entry Point — scripts/run_backtest.py (Part 21 & Part 23 Compliance)
+Backtesting Entry Point — scripts/run_backtest.py (P0 Fix #10 Compliance)
 
 Runs genuine historical portfolio walk-forward backtest using real market data from HistoricalDataProvider.
-ZERO synthetic price generation (no np.random, no fake candles).
+Consumes production TradeConstructionEngine for trade construction and position sizing.
+ZERO hardcoded R multiples (no 1.8R, 2.8R, 4.5R) and ZERO arbitrary capital allocations.
 
 Usage:
   python scripts/run_backtest.py --symbol TRENT --lookback 365
@@ -26,6 +27,7 @@ try:
 except Exception:
     pass
 
+from src.agents.trade_construction_agent import TradeConstructionEngine
 from src.backtest.engine import BacktestEngine, BacktestResult, BacktestTrade
 from src.data.historical_provider import HistoricalDataProvider
 from src.data.historical_universe import HistoricalUniverseProvider
@@ -49,37 +51,43 @@ def parse_args() -> argparse.Namespace:
 
 
 def generate_signals_from_df(df: pd.DataFrame, symbol: str) -> pd.DataFrame:
-    """Generates entry signals from pattern detection on historical bars."""
-    enriched = TechnicalIndicators.compute_all_indicators(df)
+    """
+    Generates entry signals using canonical TradeConstructionEngine on historical bars.
+    Guarantees 100% parity with live trade construction and point-in-time safety (t <= T).
+    """
+    enriched = TechnicalIndicators.compute_all_indicators(df.copy())
     signals = []
 
-    for i in range(50, len(enriched) - 15):
-        window_df = enriched.iloc[: i + 1].copy()
-        patterns = PatternRecognizer.evaluate_all_patterns(window_df)
+    for i in range(50, len(enriched)):
+        sub_df = enriched.iloc[: i + 1].copy()  # Strict Point-In-Time slice (t <= T)
+        patterns = PatternRecognizer.evaluate_all_patterns(sub_df)
 
         for p in patterns:
-            if p.is_matched and p.quality_score >= 75.0 and p.breakout_price > 0.0:
-                entry_price = p.breakout_price
-                sl_price = p.support_stop_price
-                risk = entry_price - sl_price
-
-                if risk <= 0 or (risk / entry_price) > 0.08:
+            if p.is_matched and p.quality_score >= 75.0:
+                # Delegate trade level construction to canonical TradeConstructionEngine
+                trade_levels, rej_reason = TradeConstructionEngine.construct_trade_levels(symbol, sub_df)
+                if trade_levels is None:
                     continue
+
+                date_val = str(sub_df.iloc[-1]["timestamp"]) if "timestamp" in sub_df.columns else str(sub_df.index[-1])
+                if " " in date_val:
+                    date_val = date_val.split(" ")[0]
 
                 signals.append({
                     "entry_idx": i,
-                    "entry_price": entry_price,
-                    "stop_loss": sl_price,
-                    "target_1": entry_price + risk * 1.8,
-                    "target_2": entry_price + risk * 2.8,
-                    "target_3": entry_price + risk * 4.5,
-                    "shares": max(1, int(10000 / entry_price)),
+                    "entry_date": date_val,
+                    "entry_price": trade_levels.entry_trigger_price,
+                    "stop_loss": trade_levels.stop_loss_price,
+                    "target_1": trade_levels.target_1,
+                    "target_2": trade_levels.target_2,
+                    "target_3": trade_levels.target_3,
+                    "shares": trade_levels.position_size_shares,
                     "pattern": p.pattern_type.value,
                 })
-            break
+                break
 
     return pd.DataFrame(signals) if signals else pd.DataFrame(
-        columns=["entry_idx", "entry_price", "stop_loss", "target_1", "target_2", "target_3", "shares"]
+        columns=["entry_idx", "entry_date", "entry_price", "stop_loss", "target_1", "target_2", "target_3", "shares"]
     )
 
 
@@ -119,7 +127,6 @@ async def run_single_backtest_async(symbol: str, lookback: int) -> BacktestResul
     except Exception as e:
         logger.warning(f"Error processing backtest for {symbol}: {e}")
         return None
-    return result
 
 
 async def run_universe_backtest_async(lookback: int) -> None:

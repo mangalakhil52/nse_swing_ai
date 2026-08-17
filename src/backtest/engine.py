@@ -1,7 +1,9 @@
 """
-Backtest Engine Module.
+Backtest Engine Module — Refactored for P0 #10 Single-Trade Strategy Parity.
+
 Event-driven historical simulation with realistic Indian friction costs,
-gap-through-stop handling, partial target exits, and walk-forward validation.
+gap-through-stop handling, partial target exits, worst-case same-candle conflict resolution,
+and 100% trade construction parity with the live production TradeConstructionEngine.
 """
 
 import logging
@@ -10,6 +12,7 @@ import numpy as np
 import pandas as pd
 from pydantic import BaseModel, Field
 
+from src.agents.trade_construction_agent import TradeConstructionEngine
 from src.backtest.friction import IndianFrictionModel
 
 logger = logging.getLogger(__name__)
@@ -54,7 +57,7 @@ class BacktestResult(BaseModel):
 
 class BacktestEngine:
     """
-    Event-driven backtest engine with Indian market friction and gap handling.
+    Event-driven backtest engine enforcing 100% trade construction parity with production.
     """
 
     MAX_HOLDING_SESSIONS = 15
@@ -77,11 +80,21 @@ class BacktestEngine:
     ) -> BacktestTrade:
         """
         Simulates one trade's evolution through historical OHLCV bars.
-        Handles gap-through-stop, partial target exits, and time stops.
+        Enforces real date timestamps for entry/exit and worst-case same-candle resolution.
         """
+        # Format entry_date as a real timestamp string (YYYY-MM-DD)
+        if "timestamp" in df.columns:
+            entry_date_str = str(df.iloc[entry_date_idx]["timestamp"])
+        elif hasattr(df.index, '__iter__') and len(df.index) > entry_date_idx:
+            entry_date_str = str(df.index[entry_date_idx])
+        else:
+            entry_date_str = f"BAR_{entry_date_idx}"
+        if " " in entry_date_str:
+            entry_date_str = entry_date_str.split(" ")[0]
+
         trade = BacktestTrade(
             symbol=symbol,
-            entry_date=str(df.index[entry_date_idx]) if hasattr(df.index, '__iter__') else str(entry_date_idx),
+            entry_date=entry_date_str,
             entry_price=entry_price,
             stop_loss=stop_loss,
             target_1=target_1,
@@ -99,47 +112,61 @@ class BacktestEngine:
         exit_price = entry_price
         exit_reason = "TIME_STOP"
         holding = 0
+        exit_idx = entry_date_idx
 
         for i in range(entry_date_idx + 1, min(entry_date_idx + cls.MAX_HOLDING_SESSIONS + 1, len(df))):
             row = df.iloc[i]
-            high = row["high"]
-            low = row["low"]
-            close = row["close"]
+            open_p = float(row.get("open", row["close"]))
+            high = float(row["high"])
+            low = float(row["low"])
+            close = float(row["close"])
             holding += 1
+            exit_idx = i
 
             # MAE / MFE tracking
             mae_pct = min(mae_pct, ((low - entry_price) / entry_price) * 100.0)
             mfe_pct = max(mfe_pct, ((high - entry_price) / entry_price) * 100.0)
 
-            # Gap-through-stop check (if open gaps below stop)
-            open_p = row.get("open", close)
-            if open_p < stop_loss:
-                # Gapped through stop — exit at open (realistic slippage)
-                exit_price = open_p
-                exit_reason = "STOP_LOSS_GAP"
+            # 1. Deterministic WORST-CASE rule: Same-candle conflict (both SL and Target touched in same bar)
+            if low <= stop_loss and high >= target_1:
+                if open_p < stop_loss:
+                    exit_price = open_p
+                    exit_reason = "STOP_LOSS_GAP"
+                else:
+                    exit_price = stop_loss
+                    exit_reason = "STOP_LOSS_HIT"
+                remaining_shares = 0
                 break
 
-            # Intrabar stop hit
+            # 2. Gap-through-stop check (if open gaps below stop)
+            if open_p < stop_loss:
+                exit_price = open_p
+                exit_reason = "STOP_LOSS_GAP"
+                remaining_shares = 0
+                break
+
+            # 3. Intrabar stop loss hit
             if low <= stop_loss:
                 exit_price = stop_loss
                 exit_reason = "STOP_LOSS_HIT"
+                remaining_shares = 0
                 break
 
-            # Target 1 partial exit
+            # 4. Target 1 partial exit
             if not t1_hit and high >= target_1:
                 t1_shares = int(remaining_shares * cls.T1_EXIT_PCT)
                 realized_pnl += t1_shares * (target_1 - entry_price)
                 remaining_shares -= t1_shares
                 t1_hit = True
 
-            # Target 2 partial exit
+            # 5. Target 2 partial exit
             if t1_hit and not t2_hit and high >= target_2:
                 t2_shares = int(remaining_shares * (cls.T2_EXIT_PCT / (1 - cls.T1_EXIT_PCT)))
                 realized_pnl += t2_shares * (target_2 - entry_price)
                 remaining_shares -= t2_shares
                 t2_hit = True
 
-            # Final target exit
+            # 6. Final target exit
             if t2_hit and high >= target_3:
                 realized_pnl += remaining_shares * (target_3 - entry_price)
                 remaining_shares = 0
@@ -149,15 +176,25 @@ class BacktestEngine:
 
         # Time stop: exit remaining at last close
         if remaining_shares > 0:
-            last_close = df.iloc[min(entry_date_idx + holding, len(df) - 1)]["close"]
+            last_close = float(df.iloc[min(entry_date_idx + holding, len(df) - 1)]["close"])
             realized_pnl += remaining_shares * (last_close - entry_price)
             exit_price = last_close
+
+        # Format exit_date as a real timestamp string (YYYY-MM-DD)
+        if "timestamp" in df.columns:
+            exit_date_str = str(df.iloc[exit_idx]["timestamp"])
+        elif hasattr(df.index, '__iter__') and len(df.index) > exit_idx:
+            exit_date_str = str(df.index[exit_idx])
+        else:
+            exit_date_str = f"BAR_{exit_idx}"
+        if " " in exit_date_str:
+            exit_date_str = exit_date_str.split(" ")[0]
 
         # Transaction costs
         costs = IndianFrictionModel.calculate_round_trip(entry_price, exit_price, shares)
         gross_pnl = realized_pnl
         net_pnl = gross_pnl - costs.total_cost_rupees
-        pnl_pct = (net_pnl / (entry_price * shares)) * 100.0
+        pnl_pct = (net_pnl / (entry_price * shares)) * 100.0 if (entry_price * shares) > 0 else 0.0
 
         trade.exit_price = round(exit_price, 2)
         trade.exit_reason = exit_reason
@@ -168,7 +205,7 @@ class BacktestEngine:
         trade.holding_sessions = holding
         trade.max_adverse_excursion_pct = round(mae_pct, 2)
         trade.max_favorable_excursion_pct = round(mfe_pct, 2)
-        trade.exit_date = str(entry_date_idx + holding)
+        trade.exit_date = exit_date_str
 
         return trade
 
@@ -180,7 +217,7 @@ class BacktestEngine:
         symbol: str = "BACKTEST",
     ) -> BacktestResult:
         """
-        Runs batch backtest over all identified entry signals with position sizing.
+        Runs batch backtest over identified entry signals.
         signal_df must contain columns: ['entry_idx', 'entry_price', 'stop_loss', 'target_1', 'target_2', 'target_3', 'shares']
         """
         trades: list[BacktestTrade] = []
@@ -230,7 +267,6 @@ class BacktestEngine:
         expectancy = np.mean(pnls)
         total_pnl = sum(pnls)
 
-        # Drawdown calculation using portfolio equity curve starting at initial capital (P25 & P26)
         initial_capital = 1000000.0
         equity = initial_capital + np.cumsum([0.0] + pnls)
         running_max = np.maximum.accumulate(equity)
