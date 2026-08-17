@@ -618,4 +618,68 @@ def test_insufficient_historical_setups_remains_insufficient_without_inflation()
     assert res.win_probability is None
     assert res.confidence_type == "UNAVAILABLE"
     assert res.is_ev_positive is False
+    assert "Insufficient regime-specific empirical observations" in res.disqualification_reason
+
+
+def test_probability_engine_strict_regime_filtering_no_silent_broadening():
+    """Requirement 9: Proves no silent broadening from regime-specific observations to all-regimes."""
+    from src.quant.probability_engine import HistoricalSetupOutcome, HistoricalSetupOutcomeStore, ProbabilityPathEngine
+
+    HistoricalSetupOutcomeStore.clear()
+
+    # 1. 12 BULL observations + 100 BEAR observations
+    outcomes_bull_12 = [
+        HistoricalSetupOutcome(
+            symbol=f"BULL_{i}", pattern_type=PatternType.CUP_AND_HANDLE, market_regime=MarketRegime.BULL,
+            setup_date=f"2026-01-{(i%20)+1:02d}", entry_price=100.0, stop_loss=95.0, target_1=110.0,
+            t1_hit_before_sl=True, holding_sessions=3, exit_date=f"2026-01-{(i%20)+2:02d}", source="NSE_BHAVCOPY_DAILY"
+        )
+        for i in range(12)
+    ]
+    outcomes_bear_100 = [
+        HistoricalSetupOutcome(
+            symbol=f"BEAR_{i}", pattern_type=PatternType.CUP_AND_HANDLE, market_regime=MarketRegime.BEAR,
+            setup_date=f"2026-01-{(i%20)+1:02d}", entry_price=100.0, stop_loss=95.0, target_1=110.0,
+            t1_hit_before_sl=False, holding_sessions=3, exit_date=f"2026-01-{(i%20)+2:02d}", source="NSE_BHAVCOPY_DAILY"
+        )
+        for i in range(100)
+    ]
+
+    HistoricalSetupOutcomeStore.register_outcomes(outcomes_bull_12 + outcomes_bear_100, persist=False)
+
+    # Query for BULL regime -> MUST return sample_size=12, win_probability=None, confidence_type="UNAVAILABLE"
+    res_bull = ProbabilityPathEngine.evaluate_expectancy(PatternType.CUP_AND_HANDLE, MarketRegime.BULL)
+    assert res_bull.sample_size == 12  # Strict regime count (does NOT broaden to 112!)
+    assert res_bull.win_probability is None
+    assert res_bull.confidence_type == "UNAVAILABLE"
+    assert "Insufficient regime-specific empirical observations" in res_bull.disqualification_reason
+
+    # Query for BEAR regime -> 100 observations >= 30, uses ONLY BEAR observations
+    res_bear = ProbabilityPathEngine.evaluate_expectancy(PatternType.CUP_AND_HANDLE, MarketRegime.BEAR)
+    assert res_bear.sample_size == 100
+    assert res_bear.win_probability == 0.0  # All 100 BEAR were t1_hit_before_sl=False
+    assert res_bear.confidence_type == "EMPIRICAL"
+
+
+def test_probability_engine_strict_regime_filtering_exact_30_bull():
+    """Requirement 9: 30 BULL observations -> BULL request uses exactly 30."""
+    from src.quant.probability_engine import HistoricalSetupOutcome, HistoricalSetupOutcomeStore, ProbabilityPathEngine
+
+    HistoricalSetupOutcomeStore.clear()
+
+    outcomes_bull_30 = [
+        HistoricalSetupOutcome(
+            symbol=f"BULL30_{i}", pattern_type=PatternType.CUP_AND_HANDLE, market_regime=MarketRegime.BULL,
+            setup_date=f"2026-01-{(i%20)+1:02d}", entry_price=100.0, stop_loss=95.0, target_1=110.0,
+            t1_hit_before_sl=(i < 21), holding_sessions=3, exit_date=f"2026-01-{(i%20)+2:02d}", source="NSE_BHAVCOPY_DAILY"
+        )
+        for i in range(30)
+    ]
+    HistoricalSetupOutcomeStore.register_outcomes(outcomes_bull_30, persist=False)
+
+    res = ProbabilityPathEngine.evaluate_expectancy(PatternType.CUP_AND_HANDLE, MarketRegime.BULL)
+    assert res.sample_size == 30
+    assert res.win_probability == 0.7  # 21 / 30
+    assert res.confidence_type == "EMPIRICAL"
+
 

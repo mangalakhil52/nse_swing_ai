@@ -260,12 +260,8 @@ class ProbabilityPathEngine:
         if not HistoricalSetupOutcomeStore._records:
             HistoricalSetupOutcomeStore.load_from_disk()
 
-        # Query empirical historical observations matching pattern & regime
+        # Query empirical historical observations matching pattern & regime strictly
         outcomes = HistoricalSetupOutcomeStore.query_outcomes(pattern_type, market_regime)
-        if len(outcomes) < cls.MIN_SAMPLE_SIZE:
-            # Broaden to all market regimes for pattern if regime-specific sample is insufficient
-            outcomes = HistoricalSetupOutcomeStore.query_outcomes(pattern_type, None)
-
         sample_size = len(outcomes)
 
         if sample_size < cls.MIN_SAMPLE_SIZE:
@@ -278,7 +274,7 @@ class ProbabilityPathEngine:
                 net_ev=0.0,
                 risk_reward_ratio=0.0,
                 is_ev_positive=False,
-                disqualification_reason=f"UNAVAILABLE: Insufficient empirical historical observations ({sample_size} < 30 min required).",
+                disqualification_reason=f"UNAVAILABLE: Insufficient regime-specific empirical observations ({sample_size} < 30 min required).",
             )
 
         # Compute empirical win rate from real observations
