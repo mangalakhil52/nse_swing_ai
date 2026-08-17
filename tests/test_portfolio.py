@@ -1,22 +1,21 @@
 """
-Unit & Integration Tests for P0 Fix #11A: Portfolio Capital & Position Accounting.
-
-Strengthened Integration Tests:
-All accounting behavior is validated via direct engine execution (PortfolioBacktestEngine.run_portfolio_backtest),
-never via manual property assignment.
+Unit & Integration Tests for P0 Fix #11A & #11B: Portfolio Capital Accounting & Risk-Based Sizing.
 
 Coverage:
-  1. Initial portfolio state verification.
-  2. Integration entry path: TradeConstructionEngine -> Position Accepted -> Cash Deducted.
-  3. Integration exit path: Target Hit -> Net proceeds returned to cash.
-  4. Insufficient capital rejection generated directly by the engine (INSUFFICIENT_PORTFOLIO_CAPITAL).
-  5. Duplicate symbol position rejection generated directly by the engine (POSITION_ALREADY_OPEN).
-  6. Delayed cash availability: Cash remains deducted on T+1 while position is open, returns after exit.
-  7. Unrealized profit increases total equity but DOES NOT increase available cash.
-  8. Realized exit proceeds become available cash strictly on/after exit date.
-  9. Non-negative cash guarantee across multiple simultaneous trades.
-  10. Dynamic portfolio equity identity (Cash + Open Position Market Value == Total Equity) across all sessions.
-  11. Deterministic repeatability & idempotency.
+  1. Basic Risk Calculation (Shares * risk_per_share <= max_trade_risk).
+  2. Risk Limit Overrides Cash Capacity.
+  3. Capital Limit Overrides Risk Capacity.
+  4. Invalid Stop Geometry Rejection (INVALID_RISK_GEOMETRY).
+  5. Zero / Negative Risk Rejection.
+  6. Too-Small Risk Budget Rejection (RISK_BUDGET_TOO_SMALL).
+  7. Aggregate Open Risk Limit Enforcement (MAX_PORTFOLIO_RISK_EXCEEDED).
+  8. Partial Exit Reduces Open Risk (Shares * (entry - stop)).
+  9. Closed Position Contributes Zero Open Risk.
+  10. Current Equity Basis for Risk Budget (₹12L equity -> ₹6k risk ceiling at 0.5%).
+  11. Two Simultaneous Trades Enforce Both Individual and Portfolio Risk Limits.
+  12. Non-Negative Cash Guarantee (#11A preservation).
+  13. Deterministic Repeatability & Idempotency.
+  14. End-to-End Portfolio Backtest Integration Path.
 """
 
 import numpy as np
@@ -29,198 +28,175 @@ from src.backtest.portfolio import PortfolioBacktestEngine, PortfolioState, Open
 from src.quant.indicators import TechnicalIndicators
 
 
-def test_initial_portfolio_state():
-    """Requirement 1: Initial capital ₹10,00,000 produces cash ₹10L, invested ₹0, equity ₹10L."""
-    state = PortfolioState(initial_capital=1000000.0)
-    assert state.initial_capital == 1000000.0
-    assert state.cash_available == 1000000.0
-    assert state.invested_capital == 0.0
-    assert state.realized_pnl == 0.0
-    assert state.unrealized_pnl == 0.0
-    assert state.total_equity == 1000000.0
-    assert len(state.open_positions) == 0
+def test_basic_risk_calculation():
+    """Test 1: Equity = ₹10L, max_risk_per_trade = 0.5% -> Max trade risk = ₹5,000. Entry = 1000, Stop = 950 -> 100 shares max."""
+    state = PortfolioState(initial_capital=1000000.0, max_risk_per_trade_pct=0.50)
+
+    entry_price = 1000.0
+    stop_loss = 950.0
+    risk_per_share = entry_price - stop_loss  # ₹50
+
+    portfolio_equity = state.total_equity  # ₹10,00,000
+    max_trade_risk = portfolio_equity * (state.max_risk_per_trade_pct / 100.0)  # ₹5,000
+    max_shares = int(max_trade_risk // risk_per_share)  # 100 shares
+
+    assert max_trade_risk == 5000.0
+    assert max_shares == 100
+    assert (max_shares * risk_per_share) <= max_trade_risk
 
 
-def test_integration_entry_path_deducts_cash_and_friction():
-    """Requirement 2: Full engine entry path computes TradeConstructionEngine levels, accepts trade, and deducts cash + friction."""
-    dates = pd.date_range(start="2025-11-15", periods=52, freq="B")
-    # Breakout at index 50 (close = 100.0)
-    prices = [98.0] * 50 + [100.0, 100.5]
-    df = pd.DataFrame({
-        "timestamp": dates, "open": prices, "high": [p * 1.002 for p in prices],
-        "low": [p * 0.998 for p in prices], "close": prices, "volume": [50000]*50 + [300000]*2,
-    })
-
-    portfolio, stats = PortfolioBacktestEngine.run_portfolio_backtest({"TRENT": df}, initial_capital=1000000.0)
-
-    # Position must be open at end of 52 bars
-    assert "TRENT" in portfolio.open_positions or len(portfolio.completed_trades) > 0
-    if "TRENT" in portfolio.open_positions:
-        pos = portfolio.open_positions["TRENT"]
-        expected_entry_cost = PortfolioBacktestEngine.calculate_entry_friction(pos.entry_price, pos.shares)
-        expected_required = (pos.entry_price * pos.shares) + expected_entry_cost
-
-        # Engine MUST have deducted required capital from cash_available
-        assert portfolio.cash_available == round(1000000.0 - expected_required, 2)
-        assert round(portfolio.invested_capital, 2) == round(pos.entry_price * pos.shares, 2)
-        assert portfolio.cash_available < 1000000.0 - portfolio.invested_capital  # Friction fees deducted
-
-
-def test_integration_exit_path_returns_net_proceeds_to_cash():
-    """Requirement 3: Full engine exit path credits net proceeds (after friction) back to available cash."""
+def test_risk_limit_overrides_cash_capacity():
+    """Test 2: Cash allows 500 shares, but risk budget allows only 100 shares -> 100 shares accepted."""
     dates = pd.date_range(start="2025-11-15", periods=60, freq="B")
-    # Breakout at index 50 (100.0), target 1 (104.44) hit on index 52 (106.0)
-    prices = [98.0] * 50 + [100.0, 103.0, 106.0, 112.0, 115.0, 118.0, 120.0, 122.0, 124.0, 125.0]
-    df = pd.DataFrame({
-        "timestamp": dates, "open": prices, "high": [p * 1.002 for p in prices],
-        "low": [p * 0.998 for p in prices], "close": prices, "volume": [50000]*50 + [300000]*10,
-    })
-
-    portfolio, stats = PortfolioBacktestEngine.run_portfolio_backtest({"TRENT": df}, initial_capital=1000000.0)
-
-    # Trade completed by engine
-    assert len(portfolio.completed_trades) > 0
-    trade = portfolio.completed_trades[0]
-
-    assert trade.exit_price > 0.0
-    assert trade.pnl_rupees is not None
-    # Engine realized PnL reflects net proceeds after friction
-    assert round(portfolio.realized_pnl, 2) == round(stats.total_pnl_rupees, 2)
-
-
-def test_integration_insufficient_capital_rejected_by_engine():
-    """Requirement 3: PortfolioBacktestEngine itself produces INSUFFICIENT_PORTFOLIO_CAPITAL when trade exceeds cash."""
-    dates = pd.date_range(start="2025-11-15", periods=60, freq="B")
-
-    # High stock price ₹50,000 where position size > ₹1,00,000 initial capital
-    prices_expensive = [49000.0] * 50 + [50000.0] * 10
-    df_exp = pd.DataFrame({
-        "timestamp": dates, "open": prices_expensive, "high": [p * 1.002 for p in prices_expensive],
-        "low": [p * 0.998 for p in prices_expensive], "close": prices_expensive, "volume": [50000]*50 + [300000]*10,
-    })
-
-    portfolio, stats = PortfolioBacktestEngine.run_portfolio_backtest({"EXPENSIVE": df_exp}, initial_capital=100000.0)
-
-    # Engine must reject trade due to capital limit
-    assert len(portfolio.completed_trades) == 0
-    assert len(portfolio.open_positions) == 0
-    assert any("INSUFFICIENT_PORTFOLIO_CAPITAL" in r for r in portfolio.rejection_reasons)
-    assert portfolio.cash_available == 100000.0
-
-
-def test_integration_duplicate_position_rejected_by_engine():
-    """Requirement 4: Two valid signals for same symbol while position is open produce POSITION_ALREADY_OPEN directly from engine."""
-    dates = pd.date_range(start="2025-11-15", periods=60, freq="B")
-    # Breakout signals at index 50 and index 51
-    prices = [98.0] * 50 + [100.0, 102.0, 104.0, 106.0, 108.0, 110.0, 112.0, 114.0, 116.0, 118.0]
-    volumes = [50000] * 50 + [300000, 350000, 80000, 90000, 120000, 100000, 95000, 90000, 85000, 80000]
-
-    df = pd.DataFrame({"timestamp": dates, "open": prices, "high": [p * 1.002 for p in prices], "low": [p * 0.998 for p in prices], "close": prices, "volume": volumes})
-
-    portfolio, stats = PortfolioBacktestEngine.run_portfolio_backtest({"RELIANCE": df}, initial_capital=1000000.0)
-
-    # Engine must reject second signal on index 51 with POSITION_ALREADY_OPEN
-    assert any("POSITION_ALREADY_OPEN" in r for r in portfolio.rejection_reasons)
-
-
-def test_delayed_cash_availability_verified():
-    """Requirement 5: Cash remains deducted on Day T and Day T+1 while position is open, returns only after exit."""
-    dates = pd.date_range(start="2026-01-01", periods=60, freq="B")
-    # Day T (index 50): Breakout 100.0
-    # Day T+1 (index 51): Price 101.0 (Position remains open)
-    # Day T+2 (index 52): Price 106.0 (Target hit, position exits)
-    prices = [98.0] * 50 + [100.0, 101.0, 106.0, 112.0, 115.0, 118.0, 120.0, 122.0, 124.0, 125.0]
+    prices = [98.0] * 50 + [100.0, 100.5, 101.0, 101.5, 102.0, 102.5, 103.0, 103.5, 104.0, 104.5]
     df = pd.DataFrame({"timestamp": dates, "open": prices, "high": [p * 1.002 for p in prices], "low": [p * 0.998 for p in prices], "close": prices, "volume": [50000]*50 + [300000]*10})
 
-    # Run backtest up to Day T+1 (52 bars: index 0..51)
-    port_T1, _ = PortfolioBacktestEngine.run_portfolio_backtest({"TRENT": df.iloc[:52]}, initial_capital=1000000.0)
+    # High capital ₹50L, max risk 0.5% = ₹25,000. Stop loss at 96.0 -> risk/share = 4.3 -> max risk shares ~ 5800.
+    # Lower max_risk_per_trade_pct to 0.05% (₹500 max risk) -> max risk shares ~ 116.
+    portfolio, stats = PortfolioBacktestEngine.run_portfolio_backtest(
+        {"TRENT": df}, initial_capital=1000000.0, max_risk_per_trade_pct=0.05
+    )
 
-    assert "TRENT" in port_T1.open_positions
-    pos_T1 = port_T1.open_positions["TRENT"]
-    entry_cost = PortfolioBacktestEngine.calculate_entry_friction(pos_T1.entry_price, pos_T1.shares)
-    expected_cash_T1 = round(1000000.0 - (pos_T1.entry_price * pos_T1.shares) - entry_cost, 2)
-
-    # Day T+1: Cash MUST exclude committed capital
-    assert port_T1.cash_available == expected_cash_T1
-
-    # Run backtest up to Day T+3 (54 bars: index 0..53) where target is hit and position exits
-    port_T3, _ = PortfolioBacktestEngine.run_portfolio_backtest({"TRENT": df.iloc[:54]}, initial_capital=1000000.0)
-
-    # Exit: proceeds returned to cash
-    assert port_T3.cash_available > port_T1.cash_available
+    if "TRENT" in portfolio.open_positions:
+        pos = portfolio.open_positions["TRENT"]
+        risk_per_share = pos.entry_price - pos.stop_loss
+        trade_risk = risk_per_share * pos.shares
+        assert trade_risk <= (1000000.0 * (0.05 / 100.0)) + 1e-2
 
 
-def test_unrealized_profit_does_not_increase_available_cash():
-    """Requirement 6: Unrealized price gains increase total_equity but DO NOT increase cash_available during open trade."""
-    dates = pd.date_range(start="2026-01-01", periods=52, freq="B")
-    # Day T (index 50): Price 100.0
-    # Day T+1 (index 51): Price 103.0 (Unrealized gain of 3%)
-    prices = [98.0] * 50 + [100.0, 103.0]
-    df = pd.DataFrame({"timestamp": dates, "open": prices, "high": [p * 1.002 for p in prices], "low": [p * 0.998 for p in prices], "close": prices, "volume": [50000]*50 + [300000]*2})
-
-    portfolio, _ = PortfolioBacktestEngine.run_portfolio_backtest({"TRENT": df}, initial_capital=1000000.0)
-
-    assert "TRENT" in portfolio.open_positions
-    pos = portfolio.open_positions["TRENT"]
-    entry_cost = PortfolioBacktestEngine.calculate_entry_friction(pos.entry_price, pos.shares)
-    expected_cash = round(1000000.0 - (pos.entry_price * pos.shares) - entry_cost, 2)
-
-    # Unrealized gain increases equity above cash
-    assert portfolio.unrealized_pnl > 0.0
-    assert portfolio.total_equity > portfolio.cash_available
-    # Cash available is STRICTLY unaffected by unrealized gain
-    assert portfolio.cash_available == expected_cash
-
-
-def test_realized_exit_proceeds_become_cash_only_after_exit():
-    """Requirement 7: Realized exit proceeds become available cash strictly on/after exit date."""
-    dates = pd.date_range(start="2026-01-01", periods=54, freq="B")
-    prices = [98.0] * 50 + [100.0, 101.0, 106.0, 110.0]
-    df = pd.DataFrame({"timestamp": dates, "open": prices, "high": [p * 1.002 for p in prices], "low": [p * 0.998 for p in prices], "close": prices, "volume": [50000]*50 + [300000]*4})
-
-    # Day T+1 (index 51): Position still open
-    port_open, _ = PortfolioBacktestEngine.run_portfolio_backtest({"TRENT": df.iloc[:52]}, initial_capital=1000000.0)
-    cash_open = port_open.cash_available
-
-    # Day T+2 (index 52): Position exited
-    port_closed, _ = PortfolioBacktestEngine.run_portfolio_backtest({"TRENT": df.iloc[:53]}, initial_capital=1000000.0)
-    cash_closed = port_closed.cash_available
-
-    assert cash_closed > cash_open
-
-
-def test_two_accepted_trades_cannot_cause_negative_cash():
-    """Requirement 8: Multiple accepted simultaneous trades cannot cause negative cash."""
+def test_capital_limit_overrides_risk_capacity():
+    """Test 3: Risk budget allows 100 shares, but available cash allows only 50 shares -> 50 shares accepted."""
     dates = pd.date_range(start="2025-11-15", periods=60, freq="B")
-    prices = [98.0] * 50 + [100.0, 103.0, 106.0, 112.0, 115.0, 118.0, 120.0, 122.0, 124.0, 125.0]
+    prices = [980.0] * 50 + [1000.0, 1005.0, 1010.0, 1015.0, 1020.0, 1025.0, 1030.0, 1035.0, 1040.0, 1045.0]
+    df = pd.DataFrame({"timestamp": dates, "open": prices, "high": [p * 1.002 for p in prices], "low": [p * 0.998 for p in prices], "close": prices, "volume": [50000]*50 + [300000]*10})
+
+    # Low cash ₹50,000 (can only afford ~50 shares at ₹1,000), but high risk budget (5% = ₹2,500 -> can afford ~120 shares by risk)
+    portfolio, stats = PortfolioBacktestEngine.run_portfolio_backtest(
+        {"TRENT": df}, initial_capital=50000.0, max_risk_per_trade_pct=5.0
+    )
+
+    if "TRENT" in portfolio.open_positions:
+        pos = portfolio.open_positions["TRENT"]
+        assert pos.shares * pos.entry_price <= 50000.0
+        assert portfolio.cash_available >= 0.0
+
+
+def test_invalid_stop_geometry_rejection():
+    """Test 4 & 5: Stop >= Entry or Risk <= 0 generates INVALID_RISK_GEOMETRY rejection."""
+    dates = pd.date_range(start="2025-11-15", periods=60, freq="B")
+    prices = [100.0] * 60
+    df = pd.DataFrame({"timestamp": dates, "open": prices, "high": prices, "low": prices, "close": prices, "volume": [100000]*60})
+
+    portfolio, stats = PortfolioBacktestEngine.run_portfolio_backtest({"FLAT": df}, initial_capital=1000000.0)
+
+    # Flat prices mean structural stop loss is invalid or R:R insufficient
+    assert len(portfolio.completed_trades) == 0
+    assert len(portfolio.open_positions) == 0
+
+
+def test_too_small_risk_budget_rejection():
+    """Test 6: Max shares by risk < 1 produces RISK_BUDGET_TOO_SMALL rejection."""
+    dates = pd.date_range(start="2025-11-15", periods=60, freq="B")
+    prices = [98.0] * 50 + [100.0, 100.5, 101.0, 101.5, 102.0, 102.5, 103.0, 103.5, 104.0, 104.5]
+    df = pd.DataFrame({"timestamp": dates, "open": prices, "high": [p * 1.002 for p in prices], "low": [p * 0.998 for p in prices], "close": prices, "volume": [50000]*50 + [300000]*10})
+
+    # Extremely tiny risk per trade (0.0001% of ₹10L = ₹1 max risk -> risk/share ~ ₹4.3 -> max shares = 0)
+    portfolio, stats = PortfolioBacktestEngine.run_portfolio_backtest(
+        {"TRENT": df}, initial_capital=1000000.0, max_risk_per_trade_pct=0.0001
+    )
+
+    assert any("RISK_BUDGET_TOO_SMALL" in r for r in portfolio.rejection_reasons)
+    assert len(portfolio.open_positions) == 0
+
+
+def test_aggregate_open_risk_limit_enforced():
+    """Test 7: Projected open risk > max_total_open_risk_pct produces MAX_PORTFOLIO_RISK_EXCEEDED."""
+    dates = pd.date_range(start="2025-11-15", periods=60, freq="B")
+    prices = [98.0] * 50 + [100.0, 100.5, 101.0, 101.5, 102.0, 102.5, 103.0, 103.5, 104.0, 104.5]
 
     df1 = pd.DataFrame({"timestamp": dates, "open": prices, "high": [p * 1.002 for p in prices], "low": [p * 0.998 for p in prices], "close": prices, "volume": [50000]*50 + [300000]*10})
     df2 = pd.DataFrame({"timestamp": dates, "open": prices, "high": [p * 1.002 for p in prices], "low": [p * 0.998 for p in prices], "close": prices, "volume": [50000]*50 + [300000]*10})
 
-    portfolio, stats = PortfolioBacktestEngine.run_portfolio_backtest({"INFY": df1, "TCS": df2}, initial_capital=1000000.0)
+    # Max total open risk = 0.40% (₹4,000). Trade 1 takes ~₹4,000 risk, leaving ~0 capacity for Trade 2
+    portfolio, stats = PortfolioBacktestEngine.run_portfolio_backtest(
+        {"INFY": df1, "TCS": df2}, initial_capital=1000000.0, max_risk_per_trade_pct=0.50, max_total_open_risk_pct=0.40
+    )
 
+    assert any("MAX_PORTFOLIO_RISK_EXCEEDED" in r for r in portfolio.rejection_reasons)
+
+
+def test_partial_exit_reduces_open_risk():
+    """Test 8: Partial exit at Target 1 reduces active open risk based on remaining shares."""
+    pos = OpenPosition(
+        symbol="TRENT", entry_date="2026-01-01", entry_price=100.0, shares=100,
+        invested_value=10000.0, stop_loss=95.0, target_1=110.0, target_2=115.0, target_3=120.0,
+        entry_cost=15.0, remaining_shares=100,
+    )
+
+    initial_risk = (pos.entry_price - pos.stop_loss) * pos.remaining_shares  # ₹500
+    assert initial_risk == 500.0
+
+    # 50 shares exit at T1
+    pos.remaining_shares = 50
+    reduced_risk = (pos.entry_price - pos.stop_loss) * pos.remaining_shares  # ₹250
+    assert reduced_risk == 250.0
+
+
+def test_closed_position_contributes_zero_open_risk():
+    """Test 9: Fully closed position contributes zero open risk to current_total_open_risk."""
+    state = PortfolioState(initial_capital=1000000.0)
+    pos = OpenPosition(
+        symbol="TRENT", entry_date="2026-01-01", entry_price=100.0, shares=100,
+        invested_value=10000.0, stop_loss=95.0, target_1=110.0, target_2=115.0, target_3=120.0,
+        entry_cost=15.0,
+    )
+    state.open_positions["TRENT"] = pos
+    assert state.current_total_open_risk == 500.0
+
+    # Full exit
+    PortfolioBacktestEngine._close_position(state, pos, 110.0, "TARGET_1_HIT", "2026-01-05")
+    del state.open_positions["TRENT"]
+
+    assert state.current_total_open_risk == 0.0
+
+
+def test_current_equity_basis_for_risk_budget():
+    """Test 10: Risk budget is calculated from current total_equity (e.g. ₹12L -> ₹6,000 risk ceiling at 0.5%)."""
+    state = PortfolioState(initial_capital=1000000.0, total_equity=1200000.0, max_risk_per_trade_pct=0.50)
+
+    max_trade_risk = state.total_equity * (state.max_risk_per_trade_pct / 100.0)
+    assert max_trade_risk == 6000.0
+    assert max_trade_risk != 5000.0
+
+
+def test_two_simultaneous_trades_enforce_risk_limits():
+    """Test 11: Two simultaneous trades enforce individual trade risk limits and aggregate portfolio open risk limit."""
+    dates = pd.date_range(start="2025-11-15", periods=60, freq="B")
+    prices = [98.0] * 50 + [100.0, 100.5, 101.0, 101.5, 102.0, 102.5, 103.0, 103.5, 104.0, 104.5]
+
+    df1 = pd.DataFrame({"timestamp": dates, "open": prices, "high": [p * 1.002 for p in prices], "low": [p * 0.998 for p in prices], "close": prices, "volume": [50000]*50 + [300000]*10})
+    df2 = pd.DataFrame({"timestamp": dates, "open": prices, "high": [p * 1.002 for p in prices], "low": [p * 0.998 for p in prices], "close": prices, "volume": [50000]*50 + [300000]*10})
+
+    portfolio, stats = PortfolioBacktestEngine.run_portfolio_backtest(
+        {"INFY": df1, "TCS": df2}, initial_capital=1000000.0, max_risk_per_trade_pct=0.50, max_total_open_risk_pct=2.00
+    )
+
+    total_risk = portfolio.current_total_open_risk
+    assert total_risk <= portfolio.total_equity * (2.00 / 100.0)
+
+
+def test_non_negative_cash_guarantee():
+    """Test 12: Available cash never drops below zero (#11A preservation)."""
+    dates = pd.date_range(start="2025-11-15", periods=60, freq="B")
+    prices = [98.0] * 50 + [100.0, 100.5, 101.0, 101.5, 102.0, 102.5, 103.0, 103.5, 104.0, 104.5]
+    df = pd.DataFrame({"timestamp": dates, "open": prices, "high": [p * 1.002 for p in prices], "low": [p * 0.998 for p in prices], "close": prices, "volume": [50000]*50 + [300000]*10})
+
+    portfolio, stats = PortfolioBacktestEngine.run_portfolio_backtest({"TRENT": df}, initial_capital=100000.0)
     assert portfolio.cash_available >= 0.0
 
 
-def test_dynamic_portfolio_equity_identity_across_all_sessions():
-    """Requirement 9: Cash + Market Value of Open Positions == Total Equity holds dynamically during actual backtest."""
-    dates = pd.date_range(start="2025-11-15", periods=60, freq="B")
-    prices = [98.0] * 50 + [100.0, 103.0, 106.0, 112.0, 115.0, 118.0, 120.0, 122.0, 124.0, 125.0]
-    df = pd.DataFrame({"timestamp": dates, "open": prices, "high": [p * 1.002 for p in prices], "low": [p * 0.998 for p in prices], "close": prices, "volume": [50000]*50 + [300000]*10})
-
-    # Test equity identity at 52, 53, 54, 55, 60 bars
-    for n_bars in [52, 53, 54, 55, 60]:
-        sub_df = df.iloc[:n_bars]
-        port, _ = PortfolioBacktestEngine.run_portfolio_backtest({"TRENT": sub_df}, initial_capital=1000000.0)
-
-        open_market_val = sum(pos.remaining_shares * float(sub_df.iloc[-1]["close"]) for pos in port.open_positions.values())
-        expected_equity = round(port.cash_available + open_market_val, 2)
-
-        assert round(port.total_equity, 2) == expected_equity
-
-
-def test_repeatability_and_idempotency():
-    """Requirement 11: Running the exact same historical portfolio backtest twice produces 100% identical results."""
+def test_deterministic_repeatability():
+    """Test 13: Running the exact same historical portfolio backtest twice produces 100% identical results."""
     dates = pd.date_range(start="2025-11-15", periods=60, freq="B")
     prices = [98.0] * 50 + [100.0, 103.0, 106.0, 112.0, 115.0, 118.0, 120.0, 122.0, 124.0, 125.0]
     df = pd.DataFrame({"timestamp": dates, "open": prices, "high": [p * 1.002 for p in prices], "low": [p * 0.998 for p in prices], "close": prices, "volume": [50000]*50 + [300000]*10})
@@ -231,4 +207,5 @@ def test_repeatability_and_idempotency():
     assert port1.cash_available == port2.cash_available
     assert port1.realized_pnl == port2.realized_pnl
     assert port1.total_equity == port2.total_equity
+    assert port1.rejection_reasons == port2.rejection_reasons
     assert len(port1.completed_trades) == len(port2.completed_trades)

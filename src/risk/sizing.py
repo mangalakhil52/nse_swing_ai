@@ -47,11 +47,13 @@ class PositionSizingEngine:
         # Raw shares by risk equation
         raw_shares = math.floor(max_allowed_risk_rupees / risk_per_share)
 
-        # Cap by maximum single stock allocation limit (20% of account)
         max_allocated_rupees = capital * (max_capital_allocation_pct / 100.0)
         max_shares_by_capital = math.floor(max_allocated_rupees / entry_price)
 
-        final_shares = max(1, min(raw_shares, max_shares_by_capital))
+        if raw_shares < 1 or max_shares_by_capital < 1:
+            final_shares = 0
+        else:
+            final_shares = min(raw_shares, max_shares_by_capital)
 
         total_allocated = final_shares * entry_price
         total_risk_rupees = final_shares * risk_per_share

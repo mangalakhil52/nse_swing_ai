@@ -1,13 +1,15 @@
 """
-Portfolio Capital & Position Accounting Module — src/backtest/portfolio.py (P0 Fix #11A)
+Portfolio Capital & Position Accounting Module — src/backtest/portfolio.py (P0 Fix #11A & #11B)
 
-Enforces strict portfolio-level capital accounting, chronological event processing,
-survivorship-safe position tracking, friction cost deduction, and double-counting prevention.
-Composes single-trade BacktestEngine and canonical TradeConstructionEngine without duplicating code.
+Enforces strict portfolio-level capital accounting, risk-based position sizing,
+portfolio open-risk budgets, chronological event processing, survivorship-safe position tracking,
+friction cost deduction, and double-counting prevention.
+Composes single-trade BacktestEngine, canonical TradeConstructionEngine, and PositionSizingEngine.
 """
 
 from dataclasses import dataclass, field
 import logging
+import math
 from typing import Any
 import pandas as pd
 
@@ -58,18 +60,30 @@ class PortfolioState:
     realized_pnl: float = 0.0
     unrealized_pnl: float = 0.0
     total_equity: float = 1000000.0
+    max_risk_per_trade_pct: float = 0.50
+    max_total_open_risk_pct: float = 2.00
     open_positions: dict[str, OpenPosition] = field(default_factory=dict)
     completed_trades: list[BacktestTrade] = field(default_factory=list)
     rejection_reasons: list[str] = field(default_factory=list)
 
     def __post_init__(self):
-        self.cash_available = float(self.initial_capital)
-        self.total_equity = float(self.initial_capital)
+        if self.cash_available == 1000000.0 and self.initial_capital != 1000000.0:
+            self.cash_available = float(self.initial_capital)
+        if self.total_equity == 1000000.0 and self.initial_capital != 1000000.0:
+            self.total_equity = float(self.initial_capital)
+
+    @property
+    def current_total_open_risk(self) -> float:
+        """Calculates aggregate stop-loss risk across all active open positions based on remaining shares."""
+        return sum(
+            (pos.entry_price - pos.stop_loss) * pos.remaining_shares
+            for pos in self.open_positions.values()
+        )
 
 
 class PortfolioBacktestEngine:
     """
-    Chronological portfolio walk-forward backtest simulator with strict capital accounting.
+    Chronological portfolio walk-forward backtest simulator with strict capital accounting and risk limits.
     """
 
     MAX_HOLDING_SESSIONS = 15
@@ -107,12 +121,19 @@ class PortfolioBacktestEngine:
         cls,
         stock_dfs: dict[str, pd.DataFrame],
         initial_capital: float = 1000000.0,
+        max_risk_per_trade_pct: float = 0.50,
+        max_total_open_risk_pct: float = 2.00,
     ) -> tuple[PortfolioState, BacktestResult]:
         """
         Runs full chronological portfolio walk-forward backtest across stock_dfs.
-        Enforces strict capital limits, single open position per symbol, friction deduction, and point-in-time safety.
+        Enforces strict capital limits, risk-based position sizing, aggregate open-risk ceilings,
+        single position per symbol, friction deduction, and point-in-time safety.
         """
-        portfolio = PortfolioState(initial_capital=initial_capital)
+        portfolio = PortfolioState(
+            initial_capital=initial_capital,
+            max_risk_per_trade_pct=max_risk_per_trade_pct,
+            max_total_open_risk_pct=max_total_open_risk_pct,
+        )
 
         if not stock_dfs:
             stats = BacktestEngine._compute_stats([])
@@ -266,22 +287,80 @@ class PortfolioBacktestEngine:
                         # 2. Canonical Trade Level Construction
                         canonical_levels, err = TradeConstructionEngine.construct_trade_levels(sym, sub_df)
                         if canonical_levels is None:
-                            portfolio.rejection_reasons.append(f"TRADE_REJECTED: {err}")
+                            if "stop is above or equal" in (err or "") or "INVALID_RISK_GEOMETRY" in (err or ""):
+                                portfolio.rejection_reasons.append(f"INVALID_RISK_GEOMETRY: {err}")
+                            else:
+                                portfolio.rejection_reasons.append(f"TRADE_REJECTED: {err}")
                             break
 
                         entry_price = canonical_levels.entry_trigger_price
-                        shares = canonical_levels.position_size_shares
-                        entry_cost = cls.calculate_entry_friction(entry_price, shares)
-                        required_capital = (entry_price * shares) + entry_cost
+                        stop_loss = canonical_levels.stop_loss_price
 
-                        # 3. Capital Sufficiency Check
-                        if required_capital > portfolio.cash_available:
+                        # 3. Explicit Risk Geometry Validation
+                        if entry_price <= 0.0 or stop_loss <= 0.0 or stop_loss >= entry_price:
                             portfolio.rejection_reasons.append(
-                                f"INSUFFICIENT_PORTFOLIO_CAPITAL: Required ₹{required_capital:,.2f} > Cash ₹{portfolio.cash_available:,.2f} for {sym} on {date_str}."
+                                f"INVALID_RISK_GEOMETRY: Entry {entry_price} <= 0, Stop {stop_loss} <= 0, or Stop >= Entry for {sym} on {date_str}."
                             )
                             break
 
-                        # Accept Entry: Deduct required capital from cash, record position
+                        risk_per_share = entry_price - stop_loss
+                        if risk_per_share <= 0.0:
+                            portfolio.rejection_reasons.append(
+                                f"INVALID_RISK_GEOMETRY: Risk per share {risk_per_share:.2f} <= 0 for {sym} on {date_str}."
+                            )
+                            break
+
+                        # 4. Risk Budget Sizing (uses current total equity as portfolio basis)
+                        portfolio_equity = portfolio.total_equity
+                        max_trade_risk = portfolio_equity * (portfolio.max_risk_per_trade_pct / 100.0)
+                        max_shares_by_risk = math.floor(max_trade_risk / risk_per_share)
+
+                        if max_shares_by_risk < 1:
+                            portfolio.rejection_reasons.append(
+                                f"RISK_BUDGET_TOO_SMALL: Max shares by risk ({max_shares_by_risk}) < 1 for {sym} on {date_str}."
+                            )
+                            break
+
+                        # 5. Cash Sizing Limit
+                        raw_cash_shares = math.floor(portfolio.cash_available / (entry_price * 1.002))
+                        while raw_cash_shares > 0 and ((entry_price * raw_cash_shares) + cls.calculate_entry_friction(entry_price, raw_cash_shares)) > portfolio.cash_available:
+                            raw_cash_shares -= 1
+
+                        if raw_cash_shares < 1:
+                            portfolio.rejection_reasons.append(
+                                f"INSUFFICIENT_PORTFOLIO_CAPITAL: Cash ₹{portfolio.cash_available:,.2f} cannot afford 1 share for {sym} on {date_str}."
+                            )
+                            break
+
+                        # Final Shares = min(max_shares_by_risk, max_shares_by_cash, canonical_position_size)
+                        shares = min(max_shares_by_risk, raw_cash_shares, canonical_levels.position_size_shares)
+                        if shares < 1:
+                            if max_shares_by_risk < 1:
+                                portfolio.rejection_reasons.append(
+                                    f"RISK_BUDGET_TOO_SMALL: Final shares ({shares}) < 1 for {sym} on {date_str}."
+                                )
+                            else:
+                                portfolio.rejection_reasons.append(
+                                    f"INSUFFICIENT_PORTFOLIO_CAPITAL: Final shares ({shares}) < 1 for {sym} on {date_str}."
+                                )
+                            break
+
+                        # 6. Aggregate Open-Risk Limit Check
+                        current_open_risk = portfolio.current_total_open_risk
+                        new_trade_risk = risk_per_share * shares
+                        projected_open_risk = current_open_risk + new_trade_risk
+                        max_total_open_risk = portfolio_equity * (portfolio.max_total_open_risk_pct / 100.0)
+
+                        if projected_open_risk > max_total_open_risk:
+                            portfolio.rejection_reasons.append(
+                                f"MAX_PORTFOLIO_RISK_EXCEEDED: Projected open risk ₹{projected_open_risk:,.2f} > Max allowed ₹{max_total_open_risk:,.2f} ({portfolio.max_total_open_risk_pct}%) for {sym} on {date_str}."
+                            )
+                            break
+
+                        # 7. Accept Entry: Deduct required capital from cash, record open position
+                        entry_cost = cls.calculate_entry_friction(entry_price, shares)
+                        required_capital = (entry_price * shares) + entry_cost
+
                         portfolio.cash_available -= required_capital
                         portfolio.invested_capital += (entry_price * shares)
 
@@ -291,7 +370,7 @@ class PortfolioBacktestEngine:
                             entry_price=entry_price,
                             shares=shares,
                             invested_value=round(entry_price * shares, 2),
-                            stop_loss=canonical_levels.stop_loss_price,
+                            stop_loss=stop_loss,
                             target_1=canonical_levels.target_1,
                             target_2=canonical_levels.target_2,
                             target_3=canonical_levels.target_3,
