@@ -41,20 +41,20 @@ class MarketRegimeClassifier:
         """
         Evaluates Nifty 50 trend, market participation, and volatility.
         """
-        if nifty_df.empty or len(nifty_df) < 50:
-            # Fallback safe neutral regime
+        if nifty_df is None or nifty_df.empty or len(nifty_df) < 50:
+            # P0 Fail-Closed: Return UNKNOWN regime and disallow long trades
             return RegimeAnalysisResult(
-                regime=MarketRegime.NEUTRAL,
-                trading_stance=TradingStance.SELECTIVE,
-                confidence=0.7,
-                nifty_close=24500.0,
-                trend_description="Insufficient index history; defaulting to Neutral.",
-                advance_decline_ratio=advance_decline_ratio,
-                pct_above_50_sma=pct_above_50_sma,
-                india_vix=india_vix,
-                allow_long_swing_trades=True,
-                risk_multiplier=0.5,
-                summary="Market regime set to SELECTIVE due to default data.",
+                regime=MarketRegime.UNKNOWN,
+                trading_stance=TradingStance.NO_TRADE,
+                confidence=0.0,
+                nifty_close=0.0,
+                trend_description="Insufficient or missing Nifty index data.",
+                advance_decline_ratio=0.0,
+                pct_above_50_sma=0.0,
+                india_vix=0.0,
+                allow_long_swing_trades=False,
+                risk_multiplier=0.0,
+                summary="Market regime set to UNKNOWN due to missing Nifty index data. Long trades blocked.",
             )
 
         df = TechnicalIndicators.compute_all_indicators(nifty_df)

@@ -111,9 +111,9 @@ def test_trade_construction_zero_alpha_and_structural_target():
 
 
 def test_probability_engine_sample_size_check():
-    """P1.3 & P2.1: Small sample size (< 30) returns win_probability = None and rejects trade."""
+    """P1.3 & P2.1: Small sample size (< 30) or UNKNOWN pattern returns win_probability = None and rejects trade."""
     res = ProbabilityPathEngine.evaluate_expectancy(
-        pattern_type=PatternType.UNSTRUCTURED_TREND,  # sample size = 18 < 30
+        pattern_type=PatternType.UNSTRUCTURED_TREND,
         market_regime=MarketRegime.BULL,
         mansfield_rs=5.0,
         target1_pct=12.0,
@@ -121,7 +121,7 @@ def test_probability_engine_sample_size_check():
     )
     assert res.win_probability is None
     assert res.is_ev_positive is False
-    assert "Insufficient empirical sample size" in res.disqualification_reason
+    assert "UNAVAILABLE" in res.disqualification_reason
 
 
 def test_nse_trading_session_calendar():

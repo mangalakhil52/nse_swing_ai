@@ -214,15 +214,15 @@ class CIOOrchestrator:
             logger.info(f"[{symbol}] STATUS = REJECTED | REASON = Risk Veto ({'; '.join(veto.rejection_reasons)})")
             return None, {}
 
-        # Stage 5: Probability-of-Path & Net EV Engine (P1.3, P1.4)
-        pattern_str = tech_out.metrics.get("pattern_detected", PatternType.FLAT_BASE_BREAKOUT.value) if tech_out else PatternType.FLAT_BASE_BREAKOUT.value
+        # Stage 5: Probability-of-Path & Net EV Engine (P0 Integrity)
+        pattern_str = tech_out.metrics.get("pattern_detected", PatternType.UNKNOWN.value) if tech_out else PatternType.UNKNOWN.value
         try:
             pattern_enum = PatternType(pattern_str)
         except ValueError:
-            pattern_enum = PatternType.FLAT_BASE_BREAKOUT
+            pattern_enum = PatternType.UNKNOWN
 
         mansfield_rs = rs_out.metrics.get("mansfield_rs", 0.0) if rs_out else 0.0
-        fcf_pat = fund_out.metrics.get("fcf_to_pat", 0.90) if fund_out else 0.90
+        fcf_pat = fund_out.metrics.get("fcf_to_pat") if fund_out else None
 
         prob_res = ProbabilityPathEngine.evaluate_expectancy(
             pattern_type=pattern_enum,
@@ -237,9 +237,22 @@ class CIOOrchestrator:
             logger.info(f"[{symbol}] STATUS = REJECTED | REASON = Probability/EV Engine ({prob_res.disqualification_reason})")
             return None, {}
 
-        # Stage 6: Execution Cost & Slippage Modeling
-        adtv = float(df["turnover_crores"].mean()) if "turnover_crores" in df.columns else 25.0
-        atr = float(df["high"].tail(14).mean() - df["low"].tail(14).mean()) if len(df) >= 14 else 15.0
+        # Stage 6: Execution Cost & Slippage Modeling (Zero Fallbacks)
+        if "turnover_crores" in df.columns and not df["turnover_crores"].empty and pd.notnull(df["turnover_crores"].iloc[-1]):
+            adtv = float(df["turnover_crores"].mean())
+        elif "close" in df.columns and "volume" in df.columns and not df.empty:
+            adtv = float(((df["close"] * df["volume"]) / 1e7).mean())
+        else:
+            adtv = 0.0
+
+        if len(df) >= 14:
+            atr = float((df["high"].tail(14) - df["low"].tail(14)).mean())
+        else:
+            atr = 0.0
+
+        if adtv <= 0.0 or atr <= 0.0:
+            logger.info(f"[{symbol}] STATUS = REJECTED | REASON = DATA_INSUFFICIENT_FOR_EXECUTION (ADTV or ATR unavailable)")
+            return None, {}
 
         exec_res = ExecutionQualityModel.evaluate_execution_quality(
             current_price=trade_levels.current_market_price,

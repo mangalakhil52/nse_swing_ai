@@ -111,29 +111,23 @@ async def execute_daily_5pm_cycle(target_date: date | None = None, force: bool =
     for sym_meta in universe_meta:
         sym = sym_meta.symbol
         try:
-            df_hist = asyncio.run(hist_provider.get_daily_ohlcv(sym, start_history_date, target_date, min_bars=50))
+            df_hist = await hist_provider.get_daily_ohlcv(sym, start_history_date, target_date, min_bars=50)
             stock_dfs[sym] = df_hist
         except Exception as e:
             logger.debug(f"Skipping {sym} due to unavailable/insufficient historical data: {e}")
 
-    # 6. Market Regime Classification (P0.2)
+    # 6. Market Regime Classification (Real NIFTY OHLCV Data)
+    nifty_df = pd.DataFrame()
     try:
-        nifty_df = asyncio.run(hist_provider.get_daily_ohlcv("NIFTY 50", start_history_date, target_date, min_bars=50))
-    except Exception:
-        bhav_nifty_rows = bhavcopy_df[bhavcopy_df["symbol"].str.contains("NIFTY", case=False, na=False)]
-        nifty_c = float(bhav_nifty_rows.iloc[0]["close"]) if not bhav_nifty_rows.empty else 24500.0
-        nifty_df = pd.DataFrame({
-            "timestamp": pd.date_range(end=target_date, periods=100, freq="B"),
-            "open": nifty_c, "high": nifty_c * 1.005, "low": nifty_c * 0.995,
-            "close": nifty_c, "volume": 5000000,
-        })
+        nifty_df = await hist_provider.get_daily_ohlcv("NIFTY 50", start_history_date, target_date, min_bars=50)
+    except Exception as e:
+        logger.warning(f"DATA_UNAVAILABLE: Could not fetch NIFTY 50 data ({e}). Market regime set to UNKNOWN.")
 
-    regime_result = MarketRegimeClassifier.classify_regime(
-        nifty_df=nifty_df,
-        advance_decline_ratio=1.65,
-        pct_above_50_sma=68.0,
-        india_vix=13.8,
-    )
+    regime_result = MarketRegimeClassifier.classify_regime(nifty_df=nifty_df)
+
+    if not regime_result.allow_long_swing_trades:
+        logger.warning(f"Market regime {regime_result.regime.value} prohibits long trades. Completing with 0 recommendations.")
+        return
 
     # 7. Stage-1 Screener & CIO Multi-Agent Research
     logger.info("Executing Stage-1 Quant Screener & Multi-Agent Research...")

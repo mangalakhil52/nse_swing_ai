@@ -12,6 +12,7 @@ class MarketRegime(str, Enum):
     NEUTRAL = "NEUTRAL"
     BEAR = "BEAR"
     STRONG_BEAR = "STRONG_BEAR"
+    UNKNOWN = "UNKNOWN"
 
 
 class TradingStance(str, Enum):
@@ -49,6 +50,7 @@ class PatternType(str, Enum):
     ASCENDING_TRIANGLE = "ASCENDING_TRIANGLE"
     UNSTRUCTURED_TREND = "UNSTRUCTURED_TREND"
     NO_PATTERN = "NO_PATTERN"
+    UNKNOWN = "UNKNOWN"
 
 
 class AgentStatus(str, Enum):

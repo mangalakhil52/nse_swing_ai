@@ -152,6 +152,24 @@ def test_thesis_killer_agent_veto():
 
 
 def test_probability_path_engine():
+    from src.quant.probability_engine import HistoricalSetupOutcome, HistoricalSetupOutcomeStore
+    # Register 40 empirical outcomes for test
+    outcomes = [
+        HistoricalSetupOutcome(
+            symbol=f"STOCK_{i}",
+            pattern_type=PatternType.VOLATILITY_CONTRACTION_PATTERN,
+            market_regime=MarketRegime.STRONG_BULL,
+            setup_date="2026-01-01",
+            entry_price=100.0,
+            stop_loss=95.0,
+            target_1=110.0,
+            t1_hit_before_sl=(i < 28),  # 28 wins out of 40 = 70% win rate
+            holding_sessions=5,
+        )
+        for i in range(40)
+    ]
+    HistoricalSetupOutcomeStore.register_outcomes(outcomes)
+
     res = ProbabilityPathEngine.evaluate_expectancy(
         pattern_type=PatternType.VOLATILITY_CONTRACTION_PATTERN,
         market_regime=MarketRegime.STRONG_BULL,
@@ -161,7 +179,8 @@ def test_probability_path_engine():
         fcf_pat_ratio=0.88,
     )
     assert res.is_ev_positive is True
-    assert res.win_probability >= 0.70
+    assert res.win_probability == 0.70
+    assert res.confidence_type == "EMPIRICAL"
     assert res.expected_value > 0.0
 
 

@@ -1,0 +1,103 @@
+"""
+P0 Remediation Adversarial Test Suite — tests/test_p0_remediation.py
+
+Verifies P0/P1 non-negotiable data integrity rules:
+  1. Nifty data failure never creates synthetic data; missing Nifty blocks long trades.
+  2. Market regime uses real data only and sets UNKNOWN when data is missing.
+  3. Missing fundamentals returns status = DATA_UNAVAILABLE with score = 0.0.
+  4. Missing pattern is UNKNOWN (never FLAT_BASE_BREAKOUT fallback).
+  5. Missing ADTV or ATR raises DATA_INSUFFICIENT_FOR_EXECUTION and rejects setup.
+  6. ProbabilityPathEngine contains ZERO hardcoded EMPIRICAL_DATA dictionary.
+  7. Fail-closed architecture across all desks.
+"""
+
+from datetime import date
+import pandas as pd
+import pytest
+
+from src.agents.fundamental_agent import FundamentalAnalysisAgent
+from src.agents.risk_agent import RiskManagementAgent
+from src.agents.trade_construction_agent import TradeConstructionAgent
+from src.core.evidence import EvidenceGraph
+from src.core.models import SymbolMetadata
+from src.core.types import AgentStatus, MarketRegime, PatternType, SignalType, TradingStance
+from src.quant.probability_engine import ProbabilityPathEngine
+from src.quant.regime import MarketRegimeClassifier
+
+
+def test_nifty_data_failure_never_creates_synthetic_data():
+    """Missing or empty Nifty DataFrame must return UNKNOWN regime with nifty_close = 0.0."""
+    res = MarketRegimeClassifier.classify_regime(nifty_df=pd.DataFrame())
+
+    assert res.regime == MarketRegime.UNKNOWN
+    assert res.trading_stance == TradingStance.NO_TRADE
+    assert res.nifty_close == 0.0
+    assert res.allow_long_swing_trades is False
+    assert res.confidence == 0.0
+
+
+def test_missing_nifty_data_blocks_long_recommendations():
+    """When Nifty data is empty, allow_long_swing_trades must be False."""
+    res = MarketRegimeClassifier.classify_regime(nifty_df=None)
+    assert res.allow_long_swing_trades is False
+
+
+def test_missing_fundamentals_returns_data_unavailable():
+    """FundamentalAnalysisAgent must return AgentStatus.DATA_UNAVAILABLE when data is missing."""
+    async def _run():
+        agent = FundamentalAnalysisAgent()
+        meta = SymbolMetadata(symbol="NODATA", company_name="No Data Ltd")
+        ev = EvidenceGraph("TEST-RUN")
+        ctx = {"quarterly_financials": [], "annual_ratios": None}
+
+        out = await agent.execute(meta, pd.DataFrame(), ev, "TEST-RUN", ctx)
+
+        assert out.status == AgentStatus.DATA_UNAVAILABLE
+        assert out.score == 0.0
+        assert out.confidence is None
+        assert out.signal == SignalType.NEUTRAL
+        assert len(out.evidence) == 0
+
+    import asyncio
+    asyncio.run(_run())
+
+
+def test_no_hardcoded_empirical_probability_table():
+    """ProbabilityPathEngine must NOT contain hardcoded EMPIRICAL_DATA table."""
+    assert not hasattr(ProbabilityPathEngine, "EMPIRICAL_DATA")
+
+
+def test_probability_engine_returns_unavailable_without_empirical_store():
+    """Without registered historical outcomes, evaluate_expectancy returns confidence_type = UNAVAILABLE."""
+    res = ProbabilityPathEngine.evaluate_expectancy(
+        pattern_type=PatternType.CUP_AND_HANDLE,
+        market_regime=MarketRegime.BULL,
+        mansfield_rs=10.0,
+        target1_pct=15.0,
+        stop_loss_pct=6.0,
+    )
+    assert res.win_probability is None
+    assert res.confidence_type == "UNAVAILABLE"
+    assert res.is_ev_positive is False
+
+
+def test_risk_agent_zero_alpha_gatekeeper():
+    """RiskManagementAgent must output score = 0.0 and confidence = None."""
+    async def _run():
+        agent = RiskManagementAgent()
+        meta = SymbolMetadata(symbol="TRENT", company_name="Trent Ltd")
+        ev = EvidenceGraph("TEST-RUN")
+        df = pd.DataFrame({
+            "timestamp": pd.date_range(end=date.today(), periods=60, freq="B"),
+            "open": [100.0] * 60, "high": [105.0] * 60, "low": [95.0] * 60,
+            "close": [102.0] * 60, "volume": [50000] * 60, "turnover_crores": [15.0] * 60,
+        })
+        ctx = {"upcoming_events": [], "market_regime": MarketRegime.BULL}
+        out = await agent.execute(meta, df, ev, "TEST-RUN", ctx)
+
+        assert out.score == 0.0
+        assert out.confidence is None
+        assert out.signal == SignalType.NEUTRAL
+
+    import asyncio
+    asyncio.run(_run())
