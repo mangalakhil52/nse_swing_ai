@@ -280,7 +280,7 @@ def test_cio_no_fabricated_fundamental_evidence_in_why_trade():
 
 def test_historical_outcome_generator_pipeline():
     """Verifies HistoricalOutcomeGenerator produces genuine, point-in-time safe outcomes from real historical OHLCV."""
-    from src.quant.outcome_generator import HistoricalOutcomeGenerator
+    from src.quant.historical_outcome_generator import HistoricalOutcomeGenerator
     from src.quant.probability_engine import HistoricalSetupOutcomeStore
 
     # Reset outcome store for clean test environment
@@ -333,9 +333,23 @@ def test_historical_outcome_generator_pipeline():
     assert len(HistoricalSetupOutcomeStore.query_outcomes(records[0].pattern_type)) == added
 
 
+def test_historical_outcome_generator_file_and_references():
+    """Requirement 14: Verifies src/quant/historical_outcome_generator.py exists and explicitly references HistoricalSetupOutcomeStore.register_outcomes."""
+    from pathlib import Path
+    from src.quant.historical_outcome_generator import HistoricalOutcomeGenerator
+
+    fpath = Path("src/quant/historical_outcome_generator.py")
+    assert fpath.exists(), "src/quant/historical_outcome_generator.py must exist"
+
+    content = fpath.read_text(encoding="utf-8")
+    assert "HistoricalSetupOutcomeStore.register_outcomes" in content, (
+        "src/quant/historical_outcome_generator.py must explicitly call HistoricalSetupOutcomeStore.register_outcomes"
+    )
+
+
 def test_deterministic_ohlcv_integration_test_25_days():
-    """Requirement 15: Handcrafted 25-day sequential candles integration test. Proves end-to-end outcome generation from OHLCV."""
-    from src.quant.outcome_generator import HistoricalOutcomeGenerator
+    """Requirement 11/15: Handcrafted 25-day sequential candles integration test. Proves end-to-end outcome generation from OHLCV."""
+    from src.quant.historical_outcome_generator import HistoricalOutcomeGenerator
     from src.quant.probability_engine import HistoricalSetupOutcomeStore
 
     HistoricalSetupOutcomeStore.clear()
@@ -392,7 +406,7 @@ def test_deterministic_ohlcv_integration_test_25_days():
 
 def test_outcome_generator_idempotency_duplicate_prevention():
     """Requirement 13: Running generator twice must NOT duplicate the same historical observation."""
-    from src.quant.outcome_generator import HistoricalOutcomeGenerator
+    from src.quant.historical_outcome_generator import HistoricalOutcomeGenerator
     from src.quant.probability_engine import HistoricalSetupOutcomeStore
 
     HistoricalSetupOutcomeStore.clear()
