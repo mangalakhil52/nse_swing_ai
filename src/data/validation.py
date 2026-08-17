@@ -171,3 +171,10 @@ class DataValidator:
             df = df.sort_values(by="timestamp").reset_index(drop=True)
 
         return df
+
+
+def validate_ohlcv_dataframe(df: pd.DataFrame, min_bars: int = 50, symbol: str = "UNKNOWN") -> pd.DataFrame:
+    """Standalone module-level validator enforcing OHLCV data integrity."""
+    validator = DataValidator(min_required_bars=min_bars)
+    return validator.enforce_valid_dataframe(df, symbol=symbol)
+

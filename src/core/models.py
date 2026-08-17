@@ -208,7 +208,7 @@ class AgentOutput(BaseDataModel):
     status: AgentStatus = Field(default=AgentStatus.SUCCESS)
     signal: SignalType = Field(default=SignalType.NEUTRAL)
     score: float = Field(default=0.0, ge=0.0, le=100.0)
-    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     data_freshness: DataFreshness = Field(default=DataFreshness.RECENT)
     metrics: dict[str, Any] = Field(default_factory=dict)
     evidence: list[EvidenceItem] = Field(default_factory=list)

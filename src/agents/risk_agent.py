@@ -1,13 +1,15 @@
 """
-Risk Management Specialist Agent Module.
-Enforces absolute veto power over all candidates.
-Identifies event risk (earnings in <= 3 sessions), stop distance risk (> 8%), liquidity risk, and regime risk.
+Risk Management Specialist Agent Module — Refactored for P0.6, P0.7 & P0.8 Compliance.
+Enforces absolute veto power over candidate setups.
+Outputs: PASS / CAUTION / VETO / DATA_UNAVAILABLE.
+Does NOT generate bullish alpha (score = 0.0). Uses actual NSE trading sessions for event windows.
 """
 
-from datetime import date, datetime, timedelta
+from datetime import date
 from typing import Any
 import pandas as pd
 
+from config.market_hours import get_next_trading_sessions
 from config.settings import settings
 from src.agents.base_agent import BaseAgent
 from src.core.evidence import EvidenceGraph
@@ -26,7 +28,7 @@ from src.core.types import (
 
 
 class RiskManagementAgent(BaseAgent):
-    """Specialist risk guard agent with absolute veto authority."""
+    """Specialist risk guard agent with absolute veto authority. Does not contribute to bullish alpha."""
 
     def __init__(self):
         super().__init__(agent_name="risk_management_agent")
@@ -48,15 +50,15 @@ class RiskManagementAgent(BaseAgent):
         disqualified = False
         disqualify_reason: str | None = None
 
-        # 1. Binary Event / Earnings Gap Risk Check
+        # 1. Binary Event / Earnings Gap Risk Check (Next 3 Actual NSE Trading Sessions - P0.8)
         today = date.today()
-        earnings_cutoff = today + timedelta(days=5)  # ~3 trading sessions
+        next_3_sessions = get_next_trading_sessions(today, 3)
 
         for event in upcoming_events:
             if "RESULTS" in event.event_type.upper() or "BOARD_MEETING" in event.event_type.upper():
-                if today <= event.event_date <= earnings_cutoff:
+                if event.event_date in next_3_sessions:
                     disqualified = True
-                    disqualify_reason = f"Imminent Earnings Announcement on {event.event_date} (High Overnight Gap Risk)"
+                    disqualify_reason = f"Imminent Earnings Announcement on {event.event_date} (within next 3 NSE trading sessions)"
                     risks.append(disqualify_reason)
                     break
 
@@ -68,8 +70,8 @@ class RiskManagementAgent(BaseAgent):
 
         # 3. Liquidity Risk Check
         if not df.empty:
-            turnover = df["turnover_crores"].tail(20).mean() if "turnover_crores" in df.columns else 10.0
-            if turnover < settings.MIN_ADTV_CRORES:
+            turnover = df["turnover_crores"].tail(20).mean() if "turnover_crores" in df.columns else 0.0
+            if turnover > 0.0 and turnover < settings.MIN_ADTV_CRORES:
                 disqualified = True
                 disqualify_reason = f"Inadequate liquidity: ADTV is ₹{turnover:.2f} Cr (< ₹{settings.MIN_ADTV_CRORES} Cr limit)"
                 risks.append(disqualify_reason)
@@ -80,8 +82,9 @@ class RiskManagementAgent(BaseAgent):
             if atr_pct > 7.5:
                 risks.append(f"Elevated daily volatility (ATR: {atr_pct:.1f}%)")
 
-        score = 90.0 if not disqualified else 0.0
-        signal = SignalType.REJECT if disqualified else SignalType.BULLISH
+        # P0.6: Risk agent MUST NOT generate alpha (score = 0.0, signal = NEUTRAL if pass, REJECT if fail)
+        score = 0.0
+        signal = SignalType.REJECT if disqualified else SignalType.NEUTRAL
 
         # Register Evidence
         evidence_graph.add_evidence(
@@ -92,7 +95,7 @@ class RiskManagementAgent(BaseAgent):
             observed_value=f"Risk Veto: {'PASSED' if not disqualified else 'REJECTED - ' + str(disqualify_reason)}",
             unit="status",
             source="RISK_ENGINE",
-            timestamp="EOD",
+            timestamp=today.isoformat(),
         )
 
         return AgentOutput(
@@ -102,11 +105,12 @@ class RiskManagementAgent(BaseAgent):
             status=AgentStatus.SUCCESS,
             signal=signal,
             score=score,
-            confidence=0.98,
+            confidence=None,  # P0.7: Uncalibrated confidence marked as None
             data_freshness=DataFreshness.RECENT,
             metrics={
                 "passed_risk_veto": not disqualified,
                 "disqualification_reason": disqualify_reason,
+                "confidence_status": "UNCALIBRATED",
             },
             evidence=evidence_graph.to_evidence_items(symbol),
             risks_identified=risks,

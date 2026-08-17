@@ -100,11 +100,36 @@ def is_eod_scan_ready(dt: datetime | None = None) -> bool:
     return dt.time() >= EOD_DATA_AVAILABLE
 
 
+def get_next_trading_sessions(start_date: date, n: int) -> list[date]:
+    """Returns the next n valid NSE trading session dates after start_date."""
+    sessions = []
+    curr = start_date + timedelta(days=1)
+    while len(sessions) < n:
+        if is_trading_day(curr):
+            sessions.append(curr)
+        curr += timedelta(days=1)
+    return sessions
+
+
+def get_previous_trading_sessions(start_date: date, n: int) -> list[date]:
+    """Returns the previous n valid NSE trading session dates before start_date."""
+    sessions = []
+    curr = start_date - timedelta(days=1)
+    while len(sessions) < n:
+        if is_trading_day(curr):
+            sessions.append(curr)
+        curr -= timedelta(days=1)
+    return sessions
+
+
 class MarketCalendar:
     """Class wrapper for calendar and session checks."""
 
     get_current_ist_datetime = staticmethod(get_current_ist_datetime)
     is_trading_day = staticmethod(is_trading_day)
     get_latest_trading_day = staticmethod(get_latest_trading_day)
+    get_next_trading_sessions = staticmethod(get_next_trading_sessions)
+    get_previous_trading_sessions = staticmethod(get_previous_trading_sessions)
     is_market_open = staticmethod(is_market_open)
     is_eod_scan_ready = staticmethod(is_eod_scan_ready)
+

@@ -36,3 +36,9 @@ class DisagreementError(NseSwingError):
 class ConfigurationError(NseSwingError):
     """Raised when system settings or scoring configurations are invalid."""
     pass
+
+
+class DataUnavailableException(NseSwingError):
+    """Raised when required investment data is missing or unavailable."""
+    pass
+
