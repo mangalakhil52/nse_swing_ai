@@ -138,6 +138,8 @@ class PortfolioBacktestEngine:
         initial_capital: float = 1000000.0,
         max_risk_per_trade_pct: float = 0.50,
         max_total_open_risk_pct: float = 2.00,
+        eval_start_date: str | None = None,
+        eval_end_date: str | None = None,
     ) -> tuple[PortfolioState, BacktestResult]:
         """
         Runs full chronological portfolio walk-forward backtest across stock_dfs.
@@ -169,6 +171,8 @@ class PortfolioBacktestEngine:
                 all_timestamps_set.update(e_df.index)
 
         sorted_timestamps = sorted(list(all_timestamps_set))
+        eval_start_ts = pd.to_datetime(eval_start_date) if eval_start_date else None
+        eval_end_ts = pd.to_datetime(eval_end_date) if eval_end_date else None
 
         # Main chronological daily loop
         for current_ts in sorted_timestamps:
@@ -274,128 +278,135 @@ class PortfolioBacktestEngine:
             # -------------------------------------------------------------
             # STEP 2: Process New Candidate Signals on current_ts
             # -------------------------------------------------------------
-            for sym, df_sym in enriched_dfs.items():
-                if "timestamp" in df_sym.columns:
-                    mask = pd.to_datetime(df_sym["timestamp"]) == current_ts
-                else:
-                    mask = df_sym.index == current_ts
+            is_eval_date = True
+            if eval_start_ts and current_ts < eval_start_ts:
+                is_eval_date = False
+            if eval_end_ts and current_ts > eval_end_ts:
+                is_eval_date = False
 
-                if not mask.any():
-                    continue
+            if is_eval_date:
+                for sym, df_sym in enriched_dfs.items():
+                    if "timestamp" in df_sym.columns:
+                        mask = pd.to_datetime(df_sym["timestamp"]) == current_ts
+                    else:
+                        mask = df_sym.index == current_ts
 
-                idx_list = df_sym.index[mask].tolist()
-                bar_idx = df_sym.index.get_loc(idx_list[0]) if not isinstance(idx_list[0], int) else idx_list[0]
+                    if not mask.any():
+                        continue
 
-                if bar_idx < 50:
-                    continue
+                    idx_list = df_sym.index[mask].tolist()
+                    bar_idx = df_sym.index.get_loc(idx_list[0]) if not isinstance(idx_list[0], int) else idx_list[0]
 
-                sub_df = df_sym.iloc[: bar_idx + 1]  # Point-in-time slice (t <= T)
-                patterns = PatternRecognizer.evaluate_all_patterns(sub_df)
+                    if bar_idx < 50:
+                        continue
 
-                for p in patterns:
-                    if p.is_matched and p.quality_score >= 75.0:
-                        # 1. Position Identity Check: Default 1 position per symbol
-                        if sym in portfolio.open_positions:
-                            portfolio.rejection_reasons.append(
-                                f"POSITION_ALREADY_OPEN: Position already active for {sym} on {date_str}."
-                            )
-                            break
+                    sub_df = df_sym.iloc[: bar_idx + 1]  # Point-in-time slice (t <= T)
+                    patterns = PatternRecognizer.evaluate_all_patterns(sub_df)
 
-                        # 2. Canonical Trade Level Construction
-                        canonical_levels, err = TradeConstructionEngine.construct_trade_levels(sym, sub_df)
-                        if canonical_levels is None:
-                            if "stop is above or equal" in (err or "") or "INVALID_RISK_GEOMETRY" in (err or ""):
-                                portfolio.rejection_reasons.append(f"INVALID_RISK_GEOMETRY: {err}")
-                            else:
-                                portfolio.rejection_reasons.append(f"TRADE_REJECTED: {err}")
-                            break
+                    for p in patterns:
+                        if p.is_matched and p.quality_score >= 75.0:
+                            # 1. Position Identity Check: Default 1 position per symbol
+                            if sym in portfolio.open_positions:
+                                portfolio.rejection_reasons.append(
+                                    f"POSITION_ALREADY_OPEN: Position already active for {sym} on {date_str}."
+                                )
+                                break
 
-                        entry_price = canonical_levels.entry_trigger_price
-                        stop_loss = canonical_levels.stop_loss_price
+                            # 2. Canonical Trade Level Construction
+                            canonical_levels, err = TradeConstructionEngine.construct_trade_levels(sym, sub_df)
+                            if canonical_levels is None:
+                                if "stop is above or equal" in (err or "") or "INVALID_RISK_GEOMETRY" in (err or ""):
+                                    portfolio.rejection_reasons.append(f"INVALID_RISK_GEOMETRY: {err}")
+                                else:
+                                    portfolio.rejection_reasons.append(f"TRADE_REJECTED: {err}")
+                                break
 
-                        # 3. Explicit Risk Geometry Validation
-                        if entry_price <= 0.0 or stop_loss <= 0.0 or stop_loss >= entry_price:
-                            portfolio.rejection_reasons.append(
-                                f"INVALID_RISK_GEOMETRY: Entry {entry_price} <= 0, Stop {stop_loss} <= 0, or Stop >= Entry for {sym} on {date_str}."
-                            )
-                            break
+                            entry_price = canonical_levels.entry_trigger_price
+                            stop_loss = canonical_levels.stop_loss_price
 
-                        risk_per_share = entry_price - stop_loss
-                        if risk_per_share <= 0.0:
-                            portfolio.rejection_reasons.append(
-                                f"INVALID_RISK_GEOMETRY: Risk per share {risk_per_share:.2f} <= 0 for {sym} on {date_str}."
-                            )
-                            break
+                            # 3. Explicit Risk Geometry Validation
+                            if entry_price <= 0.0 or stop_loss <= 0.0 or stop_loss >= entry_price:
+                                portfolio.rejection_reasons.append(
+                                    f"INVALID_RISK_GEOMETRY: Entry {entry_price} <= 0, Stop {stop_loss} <= 0, or Stop >= Entry for {sym} on {date_str}."
+                                )
+                                break
 
-                        # 4. Risk Budget Sizing (uses current total equity as portfolio basis)
-                        portfolio_equity = portfolio.total_equity
-                        max_trade_risk = portfolio_equity * (portfolio.max_risk_per_trade_pct / 100.0)
-                        max_shares_by_risk = math.floor(max_trade_risk / risk_per_share)
+                            risk_per_share = entry_price - stop_loss
+                            if risk_per_share <= 0.0:
+                                portfolio.rejection_reasons.append(
+                                    f"INVALID_RISK_GEOMETRY: Risk per share {risk_per_share:.2f} <= 0 for {sym} on {date_str}."
+                                )
+                                break
 
-                        if max_shares_by_risk < 1:
-                            portfolio.rejection_reasons.append(
-                                f"RISK_BUDGET_TOO_SMALL: Max shares by risk ({max_shares_by_risk}) < 1 for {sym} on {date_str}."
-                            )
-                            break
+                            # 4. Risk Budget Sizing (uses current total equity as portfolio basis)
+                            portfolio_equity = portfolio.total_equity
+                            max_trade_risk = portfolio_equity * (portfolio.max_risk_per_trade_pct / 100.0)
+                            max_shares_by_risk = math.floor(max_trade_risk / risk_per_share)
 
-                        # 5. Cash Sizing Limit
-                        raw_cash_shares = math.floor(portfolio.cash_available / (entry_price * 1.002))
-                        while raw_cash_shares > 0 and ((entry_price * raw_cash_shares) + cls.calculate_entry_friction(entry_price, raw_cash_shares)) > portfolio.cash_available:
-                            raw_cash_shares -= 1
-
-                        if raw_cash_shares < 1:
-                            portfolio.rejection_reasons.append(
-                                f"INSUFFICIENT_PORTFOLIO_CAPITAL: Cash ₹{portfolio.cash_available:,.2f} cannot afford 1 share for {sym} on {date_str}."
-                            )
-                            break
-
-                        # Final Shares = min(max_shares_by_risk, max_shares_by_cash, canonical_position_size)
-                        shares = min(max_shares_by_risk, raw_cash_shares, canonical_levels.position_size_shares)
-                        if shares < 1:
                             if max_shares_by_risk < 1:
                                 portfolio.rejection_reasons.append(
-                                    f"RISK_BUDGET_TOO_SMALL: Final shares ({shares}) < 1 for {sym} on {date_str}."
+                                    f"RISK_BUDGET_TOO_SMALL: Max shares by risk ({max_shares_by_risk}) < 1 for {sym} on {date_str}."
                                 )
-                            else:
+                                break
+
+                            # 5. Cash Sizing Limit
+                            raw_cash_shares = math.floor(portfolio.cash_available / (entry_price * 1.002))
+                            while raw_cash_shares > 0 and ((entry_price * raw_cash_shares) + cls.calculate_entry_friction(entry_price, raw_cash_shares)) > portfolio.cash_available:
+                                raw_cash_shares -= 1
+
+                            if raw_cash_shares < 1:
                                 portfolio.rejection_reasons.append(
-                                    f"INSUFFICIENT_PORTFOLIO_CAPITAL: Final shares ({shares}) < 1 for {sym} on {date_str}."
+                                    f"INSUFFICIENT_PORTFOLIO_CAPITAL: Cash ₹{portfolio.cash_available:,.2f} cannot afford 1 share for {sym} on {date_str}."
                                 )
-                            break
+                                break
 
-                        # 6. Aggregate Open-Risk Limit Check
-                        current_open_risk = portfolio.current_total_open_risk
-                        new_trade_risk = risk_per_share * shares
-                        projected_open_risk = current_open_risk + new_trade_risk
-                        max_total_open_risk = portfolio_equity * (portfolio.max_total_open_risk_pct / 100.0)
+                            # Final Shares = min(max_shares_by_risk, max_shares_by_cash, canonical_position_size)
+                            shares = min(max_shares_by_risk, raw_cash_shares, canonical_levels.position_size_shares)
+                            if shares < 1:
+                                if max_shares_by_risk < 1:
+                                    portfolio.rejection_reasons.append(
+                                        f"RISK_BUDGET_TOO_SMALL: Final shares ({shares}) < 1 for {sym} on {date_str}."
+                                    )
+                                else:
+                                    portfolio.rejection_reasons.append(
+                                        f"INSUFFICIENT_PORTFOLIO_CAPITAL: Final shares ({shares}) < 1 for {sym} on {date_str}."
+                                    )
+                                break
 
-                        if projected_open_risk > max_total_open_risk:
-                            portfolio.rejection_reasons.append(
-                                f"MAX_PORTFOLIO_RISK_EXCEEDED: Projected open risk ₹{projected_open_risk:,.2f} > Max allowed ₹{max_total_open_risk:,.2f} ({portfolio.max_total_open_risk_pct}%) for {sym} on {date_str}."
+                            # 6. Aggregate Open-Risk Limit Check
+                            current_open_risk = portfolio.current_total_open_risk
+                            new_trade_risk = risk_per_share * shares
+                            projected_open_risk = current_open_risk + new_trade_risk
+                            max_total_open_risk = portfolio_equity * (portfolio.max_total_open_risk_pct / 100.0)
+
+                            if projected_open_risk > max_total_open_risk:
+                                portfolio.rejection_reasons.append(
+                                    f"MAX_PORTFOLIO_RISK_EXCEEDED: Projected open risk ₹{projected_open_risk:,.2f} > Max allowed ₹{max_total_open_risk:,.2f} ({portfolio.max_total_open_risk_pct}%) for {sym} on {date_str}."
+                                )
+                                break
+
+                            # 7. Accept Entry: Deduct required capital from cash, record open position
+                            entry_cost = cls.calculate_entry_friction(entry_price, shares)
+                            required_capital = (entry_price * shares) + entry_cost
+
+                            portfolio.cash_available -= required_capital
+                            portfolio.invested_capital += (entry_price * shares)
+
+                            new_pos = OpenPosition(
+                                symbol=sym,
+                                entry_date=date_str,
+                                entry_price=entry_price,
+                                shares=shares,
+                                invested_value=round(entry_price * shares, 2),
+                                stop_loss=stop_loss,
+                                target_1=canonical_levels.target_1,
+                                target_2=canonical_levels.target_2,
+                                target_3=canonical_levels.target_3,
+                                entry_cost=entry_cost,
+                                entry_idx=bar_idx,
                             )
+                            portfolio.open_positions[sym] = new_pos
                             break
-
-                        # 7. Accept Entry: Deduct required capital from cash, record open position
-                        entry_cost = cls.calculate_entry_friction(entry_price, shares)
-                        required_capital = (entry_price * shares) + entry_cost
-
-                        portfolio.cash_available -= required_capital
-                        portfolio.invested_capital += (entry_price * shares)
-
-                        new_pos = OpenPosition(
-                            symbol=sym,
-                            entry_date=date_str,
-                            entry_price=entry_price,
-                            shares=shares,
-                            invested_value=round(entry_price * shares, 2),
-                            stop_loss=stop_loss,
-                            target_1=canonical_levels.target_1,
-                            target_2=canonical_levels.target_2,
-                            target_3=canonical_levels.target_3,
-                            entry_cost=entry_cost,
-                            entry_idx=bar_idx,
-                        )
-                        portfolio.open_positions[sym] = new_pos
-                        break
 
             # -------------------------------------------------------------
             # STEP 3: Mark Portfolio State & Equity Curve
@@ -426,18 +437,19 @@ class PortfolioBacktestEngine:
             # Core Capital Accounting Identity: Total Equity = Cash Available + Market Value of Open Positions
             portfolio.total_equity = round(portfolio.cash_available + market_val_sum, 2)
 
-            snapshot = DailyPortfolioSnapshot(
-                date=date_str,
-                cash_available=round(portfolio.cash_available, 2),
-                invested_capital=round(portfolio.invested_capital, 2),
-                market_value=round(market_val_sum, 2),
-                total_equity=round(portfolio.total_equity, 2),
-                realized_pnl=round(portfolio.realized_pnl, 2),
-                unrealized_pnl=round(portfolio.unrealized_pnl, 2),
-                open_positions=len(portfolio.open_positions),
-                exposure_pct=round((market_val_sum / portfolio.total_equity) * 100.0, 2) if portfolio.total_equity > 0 else 0.0,
-            )
-            portfolio.equity_curve.append(snapshot)
+            if is_eval_date:
+                snapshot = DailyPortfolioSnapshot(
+                    date=date_str,
+                    cash_available=round(portfolio.cash_available, 2),
+                    invested_capital=round(portfolio.invested_capital, 2),
+                    market_value=round(market_val_sum, 2),
+                    total_equity=round(portfolio.total_equity, 2),
+                    realized_pnl=round(portfolio.realized_pnl, 2),
+                    unrealized_pnl=round(portfolio.unrealized_pnl, 2),
+                    open_positions=len(portfolio.open_positions),
+                    exposure_pct=round((market_val_sum / portfolio.total_equity) * 100.0, 2) if portfolio.total_equity > 0 else 0.0,
+                )
+                portfolio.equity_curve.append(snapshot)
 
         stats = BacktestEngine._compute_stats(portfolio.completed_trades)
         return portfolio, stats
