@@ -308,7 +308,7 @@ def test_historical_outcome_generator_pipeline():
     })
 
     records, n_candles, n_setups = HistoricalOutcomeGenerator.generate_outcomes_for_symbol(
-        symbol="RELIANCE", df_hist=df_hist, source="NSE_BHAVCOPY_DAILY"
+        symbol="RELIANCE", df_hist=df_hist, default_regime_if_missing=MarketRegime.BULL, source="NSE_BHAVCOPY_DAILY"
     )
     assert len(records) > 0  # Real outcomes generated
 
@@ -372,9 +372,28 @@ def test_deterministic_ohlcv_integration_test_25_days():
         "turnover_crores": [10.0] * 60,
     })
 
+    nifty_df = pd.DataFrame({
+        "timestamp": dates,
+        "open": [24000.0 + i * 10 for i in range(60)],
+        "high": [24050.0 + i * 10 for i in range(60)],
+        "low": [23950.0 + i * 10 for i in range(60)],
+        "close": [24010.0 + i * 10 for i in range(60)],
+        "volume": [500000] * 60,
+    })
+    regime_context = {
+        dt.strftime("%Y-%m-%d"): {
+            "advance_decline_ratio": 1.6,
+            "pct_above_50_sma": 70.0,
+            "india_vix": 13.5,
+        }
+        for dt in dates
+    }
+
     report = HistoricalOutcomeGenerator.generate_outcomes(
         symbols=["TRENT"],
         stock_dfs={"TRENT": df_hist},
+        nifty_df=nifty_df,
+        regime_context=regime_context,
         source="NSE_BHAVCOPY_DAILY",
         target_pct=10.0,
         stop_pct=5.0,
@@ -402,6 +421,37 @@ def test_deterministic_ohlcv_integration_test_25_days():
     assert sample_rec.holding_sessions > 0
     assert sample_rec.mfe >= 10.0
     assert sample_rec.source == "NSE_BHAVCOPY_DAILY"
+    assert sample_rec.market_regime != MarketRegime.UNKNOWN
+
+
+def test_historical_outcome_generator_missing_regime_skips_outcome():
+    """Verifies that missing historical regime inputs result in UNKNOWN regime and zero outcomes generated."""
+    from src.quant.historical_outcome_generator import HistoricalOutcomeGenerator
+    from src.quant.probability_engine import HistoricalSetupOutcomeStore
+
+    HistoricalSetupOutcomeStore.clear()
+
+    dates = pd.date_range(start="2025-11-15", periods=60, freq="B")
+    prices = [90.0] * 50 + [100.0, 103.0, 106.0, 112.0, 115.0, 118.0, 120.0, 122.0, 124.0, 125.0]
+
+    df_hist = pd.DataFrame({
+        "timestamp": dates,
+        "open": prices, "high": [p * 1.01 for p in prices], "low": [p * 0.98 for p in prices],
+        "close": prices, "volume": [50000] * 50 + [300000] * 10, "turnover_crores": [10.0] * 60,
+    })
+
+    # Call generator WITHOUT regime_context or nifty_df
+    report = HistoricalOutcomeGenerator.generate_outcomes(
+        symbols=["TRENT"],
+        stock_dfs={"TRENT": df_hist},
+        nifty_df=None,
+        regime_context=None,
+        source="NSE_BHAVCOPY_DAILY",
+    )
+
+    # Missing regime data MUST skip outcome generation
+    assert report.outcomes_generated == 0
+    assert len(HistoricalSetupOutcomeStore._records) == 0
 
 
 def test_outcome_generator_idempotency_duplicate_prevention():
@@ -420,12 +470,16 @@ def test_outcome_generator_idempotency_duplicate_prevention():
         "close": prices, "volume": [50000] * 50 + [300000] * 10, "turnover_crores": [10.0] * 60,
     })
 
-    report1 = HistoricalOutcomeGenerator.generate_outcomes(["INFY"], {"INFY": df_hist}, source="NSE_BHAVCOPY_DAILY")
+    report1 = HistoricalOutcomeGenerator.generate_outcomes(
+        ["INFY"], {"INFY": df_hist}, default_regime_if_missing=MarketRegime.BULL, source="NSE_BHAVCOPY_DAILY"
+    )
     count1 = len(HistoricalSetupOutcomeStore._records)
     assert count1 > 0
 
     # Run second time
-    report2 = HistoricalOutcomeGenerator.generate_outcomes(["INFY"], {"INFY": df_hist}, source="NSE_BHAVCOPY_DAILY")
+    report2 = HistoricalOutcomeGenerator.generate_outcomes(
+        ["INFY"], {"INFY": df_hist}, default_regime_if_missing=MarketRegime.BULL, source="NSE_BHAVCOPY_DAILY"
+    )
     count2 = len(HistoricalSetupOutcomeStore._records)
 
     # Must be strictly equal to count1 (zero duplicate additions)

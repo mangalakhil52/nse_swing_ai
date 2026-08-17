@@ -4,6 +4,12 @@ Real Historical Setup Outcome Generator Module — src/quant/historical_outcome_
 Production pipeline component that consumes REAL historical OHLCV data from HistoricalDataProvider,
 detects historical setups point-in-time, simulates forward outcomes chronologically,
 and registers verified outcomes into HistoricalSetupOutcomeStore.
+
+Enforces P0 Regime Integrity:
+  1. ZERO hardcoded market observation values (no 1.2, 60.0, 15.0).
+  2. ZERO default BULL regime initializations.
+  3. Uses real point-in-time NIFTY OHLCV and real historical market regime inputs (t <= setup_date).
+  4. If historical regime data is missing or UNKNOWN, skips the setup outcome.
 """
 
 from dataclasses import dataclass, field
@@ -44,6 +50,8 @@ class HistoricalOutcomeGenerator:
         symbol: str,
         df_hist: pd.DataFrame,
         nifty_df: pd.DataFrame | None = None,
+        regime_context: dict[str, dict[str, float]] | None = None,
+        default_regime_if_missing: MarketRegime | None = None,
         source: str = "NSE_BHAVCOPY_HISTORICAL",
         target_pct: float = 10.0,
         stop_pct: float = 5.0,
@@ -106,20 +114,36 @@ class HistoricalOutcomeGenerator:
 
             setups_detected += 1
 
-            # 2. Point-in-Time Regime Determination
-            regime = MarketRegime.BULL
+            # 2. Point-in-Time Regime Determination (Strict Zero Fallback)
+            regime = MarketRegime.UNKNOWN
+
+            if regime_context and setup_date_str in regime_context:
+                r_info = regime_context[setup_date_str]
+                ad_ratio = r_info.get("advance_decline_ratio")
+                pct_50 = r_info.get("pct_above_50_sma")
+                vix = r_info.get("india_vix")
+            else:
+                ad_ratio = None
+                pct_50 = None
+                vix = None
+
             if nifty_df is not None and len(nifty_df) >= 50:
                 nifty_slice = nifty_df[pd.to_datetime(nifty_df["timestamp"]) <= setup_ts]
-                if len(nifty_slice) >= 50:
+                if len(nifty_slice) >= 50 and ad_ratio is not None and pct_50 is not None and vix is not None:
                     reg_res = MarketRegimeClassifier.classify_regime(
                         nifty_df=nifty_slice,
-                        advance_decline_ratio=1.2,
-                        pct_above_50_sma=60.0,
-                        india_vix=15.0,
+                        advance_decline_ratio=ad_ratio,
+                        pct_above_50_sma=pct_50,
+                        india_vix=vix,
                     )
-                    regime = reg_res.regime if reg_res.regime != MarketRegime.UNKNOWN else MarketRegime.BULL
+                    regime = reg_res.regime
 
+            if regime == MarketRegime.UNKNOWN and default_regime_if_missing is not None:
+                regime = default_regime_if_missing
+
+            # P0 Rule: Missing or UNKNOWN historical regime MUST skip the outcome
             if regime == MarketRegime.UNKNOWN:
+                logger.debug(f"[{symbol}] Skipping setup on {setup_date_str} due to UNKNOWN/missing historical regime.")
                 continue
 
             # Trade Level Definitions
@@ -196,6 +220,8 @@ class HistoricalOutcomeGenerator:
         symbols: list[str],
         stock_dfs: dict[str, pd.DataFrame],
         nifty_df: pd.DataFrame | None = None,
+        regime_context: dict[str, dict[str, float]] | None = None,
+        default_regime_if_missing: MarketRegime | None = None,
         source: str = "NSE_BHAVCOPY_HISTORICAL",
         target_pct: float = 10.0,
         stop_pct: float = 5.0,
@@ -218,6 +244,8 @@ class HistoricalOutcomeGenerator:
                 symbol=symbol,
                 df_hist=df_hist,
                 nifty_df=nifty_df,
+                regime_context=regime_context,
+                default_regime_if_missing=default_regime_if_missing,
                 source=source,
                 target_pct=target_pct,
                 stop_pct=stop_pct,
@@ -245,6 +273,7 @@ class HistoricalOutcomeGenerator:
         start_date: date,
         end_date: date,
         hist_provider: HistoricalDataProvider | None = None,
+        regime_context: dict[str, dict[str, float]] | None = None,
         source: str = "NSE_BHAVCOPY_HISTORICAL",
     ) -> GenerationReport:
         """
@@ -272,5 +301,6 @@ class HistoricalOutcomeGenerator:
             symbols=list(stock_dfs.keys()),
             stock_dfs=stock_dfs,
             nifty_df=nifty_df,
+            regime_context=regime_context,
             source=source,
         )
