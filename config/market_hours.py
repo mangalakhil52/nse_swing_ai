@@ -65,12 +65,17 @@ def is_trading_day(check_date: date | None = None) -> bool:
 def get_latest_trading_day(check_date: date | None = None) -> date:
     """
     Returns the most recent completed NSE trading day.
-    If check_date is a Saturday, Sunday, or holiday, steps backward to the preceding trading day (e.g. Friday).
+    If check_date is today before EOD_DATA_AVAILABLE (15:45 IST), Saturday, Sunday, or holiday,
+    steps backward to the preceding completed trading session (e.g. Friday).
     """
     if check_date is None:
         check_date = get_current_ist_datetime().date()
 
     curr = check_date
+    # If checking for today before 15:45 IST, EOD data is not yet published
+    if check_date == get_current_ist_datetime().date() and not is_eod_scan_ready():
+        curr -= timedelta(days=1)
+
     while not is_trading_day(curr):
         curr -= timedelta(days=1)
 

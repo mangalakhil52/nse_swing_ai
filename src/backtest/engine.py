@@ -230,10 +230,11 @@ class BacktestEngine:
         expectancy = np.mean(pnls)
         total_pnl = sum(pnls)
 
-        # Drawdown calculation using cumulative P&L equity curve
-        equity = np.cumsum([0.0] + pnls)
+        # Drawdown calculation using portfolio equity curve starting at initial capital (P25 & P26)
+        initial_capital = 1000000.0
+        equity = initial_capital + np.cumsum([0.0] + pnls)
         running_max = np.maximum.accumulate(equity)
-        drawdowns = ((equity - running_max) / np.maximum(running_max, 1.0)) * 100.0
+        drawdowns = ((equity - running_max) / running_max) * 100.0
         max_drawdown = float(np.min(drawdowns))
 
         return BacktestResult(
