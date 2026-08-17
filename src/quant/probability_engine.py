@@ -200,8 +200,10 @@ class HistoricalSetupOutcomeStore:
         pattern_type: PatternType,
         market_regime: MarketRegime | None = None,
     ) -> list[HistoricalSetupOutcome]:
+        if market_regime == MarketRegime.UNKNOWN:
+            return []
         results = [r for r in cls._records if r.pattern_type == pattern_type]
-        if market_regime is not None and market_regime != MarketRegime.UNKNOWN:
+        if market_regime is not None:
             results = [r for r in results if r.market_regime == market_regime]
         return results
 
@@ -241,8 +243,21 @@ class ProbabilityPathEngine:
     ) -> ProbabilityPathResult:
         """
         Calculates empirical win probability and Net EV from stored historical observations.
-        If pattern is UNKNOWN or sample size < 30, returns UNAVAILABLE without hardcoded guesses.
+        If pattern or regime is UNKNOWN or sample size < 30, returns UNAVAILABLE without hardcoded guesses.
         """
+        if market_regime == MarketRegime.UNKNOWN:
+            return ProbabilityPathResult(
+                win_probability=None,
+                sample_size=0,
+                confidence_interval="UNAVAILABLE",
+                confidence_type="UNAVAILABLE",
+                gross_ev=0.0,
+                net_ev=0.0,
+                risk_reward_ratio=0.0,
+                is_ev_positive=False,
+                disqualification_reason="UNAVAILABLE: Market regime is UNKNOWN.",
+            )
+
         if pattern_type == PatternType.UNKNOWN or pattern_type == PatternType.UNSTRUCTURED_TREND:
             return ProbabilityPathResult(
                 win_probability=None,

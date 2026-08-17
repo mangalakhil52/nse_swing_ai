@@ -683,3 +683,51 @@ def test_probability_engine_strict_regime_filtering_exact_30_bull():
     assert res.confidence_type == "EMPIRICAL"
 
 
+def test_probability_engine_unknown_regime_fail_closed():
+    """Requirement 6: Regression tests proving MarketRegime.UNKNOWN fails closed."""
+    from src.quant.probability_engine import HistoricalSetupOutcome, HistoricalSetupOutcomeStore, ProbabilityPathEngine
+
+    HistoricalSetupOutcomeStore.clear()
+
+    # Store 40 BULL + 40 BEAR observations
+    bull_recs = [
+        HistoricalSetupOutcome(
+            symbol=f"BULL_{i}", pattern_type=PatternType.VOLATILITY_CONTRACTION_PATTERN, market_regime=MarketRegime.BULL,
+            setup_date="2026-01-01", entry_price=100.0, stop_loss=95.0, target_1=110.0,
+            t1_hit_before_sl=True, holding_sessions=3, exit_date="2026-01-05", source="NSE_BHAVCOPY_DAILY"
+        )
+        for i in range(40)
+    ]
+    bear_recs = [
+        HistoricalSetupOutcome(
+            symbol=f"BEAR_{i}", pattern_type=PatternType.VOLATILITY_CONTRACTION_PATTERN, market_regime=MarketRegime.BEAR,
+            setup_date="2026-01-01", entry_price=100.0, stop_loss=95.0, target_1=110.0,
+            t1_hit_before_sl=False, holding_sessions=3, exit_date="2026-01-05", source="NSE_BHAVCOPY_DAILY"
+        )
+        for i in range(40)
+    ]
+    HistoricalSetupOutcomeStore.register_outcomes(bull_recs + bear_recs, persist=False)
+
+    # Test 1: query_outcomes(VCP, UNKNOWN) MUST return []
+    res_unknown_query = HistoricalSetupOutcomeStore.query_outcomes(PatternType.VOLATILITY_CONTRACTION_PATTERN, MarketRegime.UNKNOWN)
+    assert res_unknown_query == []
+
+    # Test 2: evaluate_expectancy(VCP, UNKNOWN) MUST return win_probability=None, sample_size=0, confidence_type="UNAVAILABLE"
+    res_unknown_eval = ProbabilityPathEngine.evaluate_expectancy(PatternType.VOLATILITY_CONTRACTION_PATTERN, MarketRegime.UNKNOWN)
+    assert res_unknown_eval.win_probability is None
+    assert res_unknown_eval.sample_size == 0
+    assert res_unknown_eval.confidence_type == "UNAVAILABLE"
+    assert res_unknown_eval.gross_ev == 0.0
+    assert res_unknown_eval.net_ev == 0.0
+    assert res_unknown_eval.risk_reward_ratio == 0.0
+    assert res_unknown_eval.is_ev_positive is False
+    assert res_unknown_eval.disqualification_reason == "UNAVAILABLE: Market regime is UNKNOWN."
+
+    # Test 3: evaluate_expectancy(VCP, BULL) MUST use ONLY BULL observations
+    res_bull_eval = ProbabilityPathEngine.evaluate_expectancy(PatternType.VOLATILITY_CONTRACTION_PATTERN, MarketRegime.BULL)
+    assert res_bull_eval.sample_size == 40
+    assert res_bull_eval.win_probability == 1.0
+    assert res_bull_eval.confidence_type == "EMPIRICAL"
+
+
+
