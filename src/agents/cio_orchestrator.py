@@ -335,17 +335,38 @@ class CIOOrchestrator:
 
         why_trade: list[str] = []
         if tech_out and tech_out.signal == SignalType.BULLISH:
-            pattern = tech_out.metrics.get("pattern_detected", "Strong Setup")
-            why_trade.append(f"Technical: {pattern}")
+            pattern = tech_out.metrics.get("pattern_detected")
+            if pattern:
+                why_trade.append(f"Technical: {pattern}")
         if rs_out and rs_out.signal == SignalType.BULLISH:
-            rs_val = rs_out.metrics.get("mansfield_rs", 0.0)
-            why_trade.append(f"RS Leader: Outperforming NIFTY by {rs_val:.1f}% (Mansfield RS)")
-        if fund_out and fund_out.signal == SignalType.BULLISH:
-            pat_g = fund_out.metrics.get("pat_growth_yoy", 0.0)
-            why_trade.append(f"Fundamentals: PAT growth +{pat_g:.1f}% YoY with FCF/PAT {fund_out.metrics.get('fcf_to_pat', 0.9):.2f}")
-        why_trade.append(f"Expectancy: Empirical P(Win) {prob_res.win_probability*100:.0f}% (n={prob_res.sample_size}), Net EV +{prob_res.net_ev:.2f}%")
+            rs_val = rs_out.metrics.get("mansfield_rs")
+            if rs_val is not None:
+                why_trade.append(f"RS Leader: Outperforming NIFTY by {rs_val:.1f}% (Mansfield RS)")
+        if fund_out and fund_out.status == AgentStatus.SUCCESS:
+            fund_parts = []
+            pat_g = fund_out.metrics.get("pat_growth_yoy")
+            if pat_g is not None:
+                fund_parts.append(f"PAT growth +{pat_g:.1f}% YoY")
+            fcf_pat = fund_out.metrics.get("fcf_to_pat")
+            if fcf_pat is not None:
+                fund_parts.append(f"FCF/PAT {fcf_pat:.2f}")
+            if fund_parts:
+                why_trade.append(f"Fundamentals: {' with '.join(fund_parts)}")
+
+        if prob_res.win_probability is not None and prob_res.net_ev is not None:
+            why_trade.append(f"Expectancy: Empirical P(Win) {prob_res.win_probability*100:.0f}% (n={prob_res.sample_size}), Net EV +{prob_res.net_ev:.2f}%")
 
         rec_id = f"REC-{datetime.utcnow().strftime('%Y%m%d')}-{symbol_meta.symbol}-{uuid.uuid4().hex[:6].upper()}"
+
+        summary_parts = []
+        if fund_out and fund_out.status == AgentStatus.SUCCESS:
+            roe_val = fund_out.metrics.get("roe")
+            if roe_val is not None:
+                summary_parts.append(f"ROE {roe_val:.1f}%")
+            fcf_val = fund_out.metrics.get("fcf_to_pat")
+            if fcf_val is not None:
+                summary_parts.append(f"FCF/PAT {fcf_val:.2f}")
+        fund_summary_str = ", ".join(summary_parts) if summary_parts else "DATA_UNAVAILABLE"
 
         recommendation = TradeRecommendation(
             recommendation_id=rec_id,
@@ -361,7 +382,7 @@ class CIOOrchestrator:
             catalyst_summary=agent_outputs.get("catalyst_agent", AgentOutput(
                 agent_name="catalyst_agent", symbol=symbol_meta.symbol, run_id=run_id
             )).metrics.get("description", "No catalyst"),
-            fundamental_summary=f"ROE {fund_out.metrics.get('roe', 0.0):.1f}%, FCF/PAT {fund_out.metrics.get('fcf_to_pat', 0.9):.2f}" if fund_out else "N/A",
+            fundamental_summary=fund_summary_str,
             sector_context=f"Sector rank: #{agent_outputs.get('sector_rotation_agent', AgentOutput(agent_name='s', symbol=symbol_meta.symbol, run_id=run_id)).metrics.get('sector_rank', '?')}",
             market_regime=market_regime.value,
             major_risks=all_risks,

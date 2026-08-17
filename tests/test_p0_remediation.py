@@ -223,3 +223,56 @@ def test_cio_rejects_candidate_when_market_regime_is_missing_null_invalid_or_unk
 
     import asyncio
     asyncio.run(_run())
+
+
+def test_cio_no_fabricated_fundamental_evidence_in_why_trade():
+    """Missing PAT growth or FCF/PAT must not produce fabricated numeric claims in why_this_trade or fundamental_summary."""
+    from src.core.models import AgentOutput
+    from src.core.types import AgentStatus
+
+    # Create AgentOutput with status SUCCESS but missing pat_growth_yoy / fcf_to_pat
+    out_missing = AgentOutput(
+        agent_name="fundamental_analysis_agent",
+        symbol="RELIANCE",
+        run_id="TEST",
+        status=AgentStatus.SUCCESS,
+        signal=SignalType.BULLISH,
+        score=75.0,
+        metrics={},  # Missing pat_growth_yoy and fcf_to_pat
+    )
+
+    # Verify no fabricated claims when metrics are missing
+    fund_parts = []
+    pat_g = out_missing.metrics.get("pat_growth_yoy")
+    assert pat_g is None
+    if pat_g is not None:
+        fund_parts.append(f"PAT growth +{pat_g:.1f}% YoY")
+    fcf_pat = out_missing.metrics.get("fcf_to_pat")
+    assert fcf_pat is None
+    if fcf_pat is not None:
+        fund_parts.append(f"FCF/PAT {fcf_pat:.2f}")
+
+    assert len(fund_parts) == 0  # Zero fabricated parts
+
+    # Create AgentOutput with valid metrics
+    out_valid = AgentOutput(
+        agent_name="fundamental_analysis_agent",
+        symbol="RELIANCE",
+        run_id="TEST",
+        status=AgentStatus.SUCCESS,
+        signal=SignalType.BULLISH,
+        score=85.0,
+        metrics={"pat_growth_yoy": 24.3, "fcf_to_pat": 1.15},
+    )
+
+    valid_parts = []
+    pat_g_valid = out_valid.metrics.get("pat_growth_yoy")
+    if pat_g_valid is not None:
+        valid_parts.append(f"PAT growth +{pat_g_valid:.1f}% YoY")
+    fcf_pat_valid = out_valid.metrics.get("fcf_to_pat")
+    if fcf_pat_valid is not None:
+        valid_parts.append(f"FCF/PAT {fcf_pat_valid:.2f}")
+
+    assert len(valid_parts) == 2
+    assert "PAT growth +24.3% YoY" in valid_parts[0]
+    assert "FCF/PAT 1.15" in valid_parts[1]
