@@ -2,6 +2,7 @@
 
 from src.backtest.friction import IndianFrictionModel, TransactionCosts
 from src.backtest.engine import BacktestEngine, BacktestResult, BacktestTrade
+from src.backtest.portfolio import PortfolioState, OpenPosition, PortfolioBacktestEngine
 
 __all__ = [
     "IndianFrictionModel",
@@ -9,4 +10,7 @@ __all__ = [
     "BacktestEngine",
     "BacktestResult",
     "BacktestTrade",
+    "PortfolioState",
+    "OpenPosition",
+    "PortfolioBacktestEngine",
 ]
