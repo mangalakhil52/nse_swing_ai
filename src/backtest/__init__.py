@@ -1,8 +1,7 @@
-"""Backtesting simulation, friction, and walk-forward validation package."""
-
 from src.backtest.friction import IndianFrictionModel, TransactionCosts
 from src.backtest.engine import BacktestEngine, BacktestResult, BacktestTrade
-from src.backtest.portfolio import PortfolioState, OpenPosition, PortfolioBacktestEngine
+from src.backtest.portfolio import PortfolioState, OpenPosition, PortfolioBacktestEngine, DailyPortfolioSnapshot
+from src.backtest.performance import PerformanceAnalyzer, PerformanceReport
 
 __all__ = [
     "IndianFrictionModel",
@@ -13,4 +12,7 @@ __all__ = [
     "PortfolioState",
     "OpenPosition",
     "PortfolioBacktestEngine",
+    "DailyPortfolioSnapshot",
+    "PerformanceAnalyzer",
+    "PerformanceReport",
 ]

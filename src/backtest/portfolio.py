@@ -53,6 +53,19 @@ class OpenPosition:
 
 
 @dataclass
+class DailyPortfolioSnapshot:
+    date: str
+    cash_available: float
+    invested_capital: float
+    market_value: float
+    total_equity: float
+    realized_pnl: float
+    unrealized_pnl: float
+    open_positions: int
+    exposure_pct: float
+
+
+@dataclass
 class PortfolioState:
     initial_capital: float = 1000000.0
     cash_available: float = 1000000.0
@@ -65,6 +78,7 @@ class PortfolioState:
     open_positions: dict[str, OpenPosition] = field(default_factory=dict)
     completed_trades: list[BacktestTrade] = field(default_factory=list)
     rejection_reasons: list[str] = field(default_factory=list)
+    equity_curve: list[DailyPortfolioSnapshot] = field(default_factory=list)
 
     def __post_init__(self):
         if self.cash_available == 1000000.0 and self.initial_capital != 1000000.0:
@@ -408,6 +422,19 @@ class PortfolioBacktestEngine:
             portfolio.unrealized_pnl = round(unrealized_sum, 2)
             # Core Capital Accounting Identity: Total Equity = Cash Available + Market Value of Open Positions
             portfolio.total_equity = round(portfolio.cash_available + market_val_sum, 2)
+
+            snapshot = DailyPortfolioSnapshot(
+                date=date_str,
+                cash_available=round(portfolio.cash_available, 2),
+                invested_capital=round(portfolio.invested_capital, 2),
+                market_value=round(market_val_sum, 2),
+                total_equity=round(portfolio.total_equity, 2),
+                realized_pnl=round(portfolio.realized_pnl, 2),
+                unrealized_pnl=round(portfolio.unrealized_pnl, 2),
+                open_positions=len(portfolio.open_positions),
+                exposure_pct=round((market_val_sum / portfolio.total_equity) * 100.0, 2) if portfolio.total_equity > 0 else 0.0,
+            )
+            portfolio.equity_curve.append(snapshot)
 
         stats = BacktestEngine._compute_stats(portfolio.completed_trades)
         return portfolio, stats
