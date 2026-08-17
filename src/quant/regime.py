@@ -19,9 +19,9 @@ class RegimeAnalysisResult(BaseModel):
     confidence: float = Field(default=0.9, ge=0.0, le=1.0)
     nifty_close: float
     trend_description: str
-    advance_decline_ratio: float
-    pct_above_50_sma: float
-    india_vix: float
+    advance_decline_ratio: float | None = None
+    pct_above_50_sma: float | None = None
+    india_vix: float | None = None
     allow_long_swing_trades: bool
     risk_multiplier: float = Field(default=1.0, description="Multiplier for position sizing risk (e.g. 1.0, 0.75, 0.5, 0.0)")
     summary: str
@@ -33,28 +33,36 @@ class MarketRegimeClassifier:
     @classmethod
     def classify_regime(
         cls,
-        nifty_df: pd.DataFrame,
-        advance_decline_ratio: float = 1.2,
-        pct_above_50_sma: float = 62.0,
-        india_vix: float = 14.5,
+        nifty_df: pd.DataFrame | None = None,
+        advance_decline_ratio: float | None = None,
+        pct_above_50_sma: float | None = None,
+        india_vix: float | None = None,
     ) -> RegimeAnalysisResult:
         """
         Evaluates Nifty 50 trend, market participation, and volatility.
+        Returns MarketRegime.UNKNOWN if any required market-regime input is missing.
         """
-        if nifty_df is None or nifty_df.empty or len(nifty_df) < 50:
-            # P0 Fail-Closed: Return UNKNOWN regime and disallow long trades
+        if (
+            nifty_df is None
+            or nifty_df.empty
+            or len(nifty_df) < 50
+            or advance_decline_ratio is None
+            or pct_above_50_sma is None
+            or india_vix is None
+        ):
+            # P0 Fail-Closed: Return UNKNOWN regime and disallow long trades if any required market observation is missing
             return RegimeAnalysisResult(
                 regime=MarketRegime.UNKNOWN,
                 trading_stance=TradingStance.NO_TRADE,
                 confidence=0.0,
-                nifty_close=0.0,
-                trend_description="Insufficient or missing Nifty index data.",
-                advance_decline_ratio=0.0,
-                pct_above_50_sma=0.0,
-                india_vix=0.0,
+                nifty_close=0.0 if (nifty_df is None or nifty_df.empty) else float(nifty_df["close"].iloc[-1]),
+                trend_description="Missing required market-regime inputs (Nifty, A/D ratio, % above 50 SMA, or India VIX).",
+                advance_decline_ratio=advance_decline_ratio,
+                pct_above_50_sma=pct_above_50_sma,
+                india_vix=india_vix,
                 allow_long_swing_trades=False,
                 risk_multiplier=0.0,
-                summary="Market regime set to UNKNOWN due to missing Nifty index data. Long trades blocked.",
+                summary="Market regime set to UNKNOWN due to missing required market-regime data. Long trades blocked.",
             )
 
         df = TechnicalIndicators.compute_all_indicators(nifty_df)

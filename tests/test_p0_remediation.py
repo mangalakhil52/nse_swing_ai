@@ -42,6 +42,75 @@ def test_missing_nifty_data_blocks_long_recommendations():
     assert res.allow_long_swing_trades is False
 
 
+def test_missing_advance_decline_returns_unknown_regime():
+    """Missing advance_decline_ratio (None) must return UNKNOWN regime."""
+    nifty_df = pd.DataFrame({
+        "timestamp": pd.date_range(end=date.today(), periods=60, freq="B"),
+        "open": [24000.0] * 60, "high": [24200.0] * 60, "low": [23900.0] * 60,
+        "close": [24100.0] * 60, "volume": [500000] * 60,
+    })
+    res = MarketRegimeClassifier.classify_regime(
+        nifty_df=nifty_df,
+        advance_decline_ratio=None,
+        pct_above_50_sma=65.0,
+        india_vix=14.0,
+    )
+    assert res.regime == MarketRegime.UNKNOWN
+    assert res.allow_long_swing_trades is False
+
+
+def test_missing_pct_above_50_sma_returns_unknown_regime():
+    """Missing pct_above_50_sma (None) must return UNKNOWN regime."""
+    nifty_df = pd.DataFrame({
+        "timestamp": pd.date_range(end=date.today(), periods=60, freq="B"),
+        "open": [24000.0] * 60, "high": [24200.0] * 60, "low": [23900.0] * 60,
+        "close": [24100.0] * 60, "volume": [500000] * 60,
+    })
+    res = MarketRegimeClassifier.classify_regime(
+        nifty_df=nifty_df,
+        advance_decline_ratio=1.5,
+        pct_above_50_sma=None,
+        india_vix=14.0,
+    )
+    assert res.regime == MarketRegime.UNKNOWN
+    assert res.allow_long_swing_trades is False
+
+
+def test_missing_india_vix_returns_unknown_regime():
+    """Missing india_vix (None) must return UNKNOWN regime."""
+    nifty_df = pd.DataFrame({
+        "timestamp": pd.date_range(end=date.today(), periods=60, freq="B"),
+        "open": [24000.0] * 60, "high": [24200.0] * 60, "low": [23900.0] * 60,
+        "close": [24100.0] * 60, "volume": [500000] * 60,
+    })
+    res = MarketRegimeClassifier.classify_regime(
+        nifty_df=nifty_df,
+        advance_decline_ratio=1.5,
+        pct_above_50_sma=65.0,
+        india_vix=None,
+    )
+    assert res.regime == MarketRegime.UNKNOWN
+    assert res.allow_long_swing_trades is False
+
+
+def test_all_valid_inputs_returns_valid_classification():
+    """When all required inputs are present, existing classification logic runs."""
+    prices = [24000.0 + i * 20.0 for i in range(60)]
+    nifty_df = pd.DataFrame({
+        "timestamp": pd.date_range(end=date.today(), periods=60, freq="B"),
+        "open": prices, "high": [p * 1.01 for p in prices], "low": [p * 0.99 for p in prices],
+        "close": prices, "volume": [500000] * 60,
+    })
+    res = MarketRegimeClassifier.classify_regime(
+        nifty_df=nifty_df,
+        advance_decline_ratio=1.6,
+        pct_above_50_sma=70.0,
+        india_vix=13.5,
+    )
+    assert res.regime in [MarketRegime.STRONG_BULL, MarketRegime.BULL, MarketRegime.NEUTRAL]
+    assert res.allow_long_swing_trades is True
+
+
 def test_missing_fundamentals_returns_data_unavailable():
     """FundamentalAnalysisAgent must return AgentStatus.DATA_UNAVAILABLE when data is missing."""
     async def _run():
