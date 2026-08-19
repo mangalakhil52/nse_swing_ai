@@ -46,27 +46,37 @@ class ScreenerFundamentalProvider(FundamentalProvider):
             try:
                 data = json.loads(cache_file.read_text(encoding="utf-8"))
                 quarters = data.get("quarterly_results", [])
-                return [
-                    QuarterlyFinancials(
-                        symbol=symbol,
-                        period_end_date=datetime.strptime(q["period_end_date"], "%Y-%m-%d").date(),
-                        sales_crores=float(q["sales_crores"]),
-                        sales_growth_yoy_pct=float(q["sales_growth_yoy_pct"]),
-                        pat_crores=float(q["pat_crores"]),
-                        pat_growth_yoy_pct=float(q["pat_growth_yoy_pct"]),
-                        ebitda_margin_pct=float(q["ebitda_margin_pct"]),
-                        eps_inr=float(q["eps_inr"]),
+                results = []
+                for q in quarters:
+                    f_date = datetime.strptime(q["filing_date"], "%Y-%m-%d").date() if q.get("filing_date") else None
+                    a_date = datetime.strptime(q["available_at"], "%Y-%m-%d").date() if q.get("available_at") else f_date
+                    is_verified = (a_date is not None)
+                    results.append(
+                        QuarterlyFinancials(
+                            symbol=symbol,
+                            period_end_date=datetime.strptime(q["period_end_date"], "%Y-%m-%d").date(),
+                            filing_date=f_date,
+                            available_at=a_date,
+                            sales_crores=float(q["sales_crores"]),
+                            sales_growth_yoy_pct=float(q["sales_growth_yoy_pct"]),
+                            pat_crores=float(q["pat_crores"]),
+                            pat_growth_yoy_pct=float(q["pat_growth_yoy_pct"]),
+                            ebitda_margin_pct=float(q["ebitda_margin_pct"]),
+                            eps_inr=float(q["eps_inr"]),
+                            pit_status="VERIFIED" if is_verified else "PIT_UNVERIFIED",
+                        )
                     )
-                    for q in quarters
-                ]
+                return results
             except Exception as e:
                 logger.warning(f"Failed to read cached fundamentals for {symbol}: {e}")
 
-        # Return baseline structured proxy for research desks when offline or un-synced
+        # Return baseline structured proxy for research desks when offline or un-synced (marked PIT_UNVERIFIED with None availability)
         return [
             QuarterlyFinancials(
                 symbol=symbol,
                 period_end_date=date(2026, 6, 30),
+                filing_date=None,
+                available_at=None,
                 sales_crores=1250.0,
                 sales_growth_yoy_pct=18.5,
                 pat_crores=185.0,
@@ -74,6 +84,7 @@ class ScreenerFundamentalProvider(FundamentalProvider):
                 ebitda_margin_pct=19.4,
                 eps_inr=14.2,
                 data_source="SCREENER_API",
+                pit_status="PIT_UNVERIFIED",
             )
         ]
 

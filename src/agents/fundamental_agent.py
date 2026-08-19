@@ -33,9 +33,26 @@ class FundamentalAnalysisAgent(BaseAgent):
         run_id: str,
         context: dict[str, Any],
     ) -> AgentOutput:
+        from datetime import date
+        from src.data.point_in_time import PointInTimeFilter
+
         symbol = symbol_meta.symbol
-        quarterly: list[QuarterlyFinancials] = context.get("quarterly_financials", [])
+        raw_quarterly: list[QuarterlyFinancials] = context.get("quarterly_financials", [])
         ratios: AnnualRatios | None = context.get("annual_ratios")
+
+        as_of_date = context.get("as_of_date")
+        if as_of_date and raw_quarterly:
+            as_of_d = as_of_date if isinstance(as_of_date, date) else pd.to_datetime(as_of_date).date()
+            quarterly = PointInTimeFilter.filter_quarterly_financials(raw_quarterly, as_of_d)
+        else:
+            quarterly = raw_quarterly
+
+        if quarterly:
+            quarterly = sorted(
+                quarterly,
+                key=lambda q: (getattr(q, "available_at", None) or getattr(q, "filing_date", None) or date.min),
+                reverse=True,
+            )
 
         # P0 Rule: If fundamental data is unavailable, return DATA_UNAVAILABLE without fabricating values
         if not quarterly and ratios is None:

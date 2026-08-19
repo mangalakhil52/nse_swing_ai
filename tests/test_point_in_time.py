@@ -429,3 +429,254 @@ def test_pit_contract_fails_closed_on_future_row():
         PointInTimeFilter.enforce_pit_boundary(future_df, as_of_dt)
 
     assert "PIT Violation" in str(exc_info.value)
+
+
+# ===========================================================================
+# P0 #12B — FUNDAMENTAL POINT-IN-TIME INTEGRITY TESTS
+# ===========================================================================
+
+def test_fundamental_publication_date_controls_visibility():
+    """18. Test filing_date / available_at strictly controls fundamental record visibility."""
+    rec_a = QuarterlyFinancials(
+        symbol="TRENT",
+        period_end_date=date(2026, 3, 31),
+        filing_date=date(2026, 5, 15),
+        available_at=date(2026, 5, 15),
+        sales_crores=1200.0,
+        sales_growth_yoy_pct=20.0,
+        pat_crores=180.0,
+        pat_growth_yoy_pct=25.0,
+        ebitda_margin_pct=18.0,
+        eps_inr=15.0,
+        pit_status="VERIFIED",
+    )
+
+    assert len(PointInTimeFilter.filter_quarterly_financials([rec_a], date(2026, 4, 30))) == 0
+    assert len(PointInTimeFilter.filter_quarterly_financials([rec_a], date(2026, 5, 14))) == 0
+    assert len(PointInTimeFilter.filter_quarterly_financials([rec_a], date(2026, 5, 15))) == 1
+    assert len(PointInTimeFilter.filter_quarterly_financials([rec_a], date(2026, 5, 16))) == 1
+
+
+def test_period_end_does_not_grant_early_visibility():
+    """19. Test period_end_date <= as_of_date does NOT grant early visibility if available_at > as_of_date."""
+    rec = QuarterlyFinancials(
+        symbol="TRENT",
+        period_end_date=date(2026, 3, 31),
+        filing_date=date(2026, 5, 15),
+        available_at=date(2026, 5, 15),
+        sales_crores=1200.0,
+        sales_growth_yoy_pct=20.0,
+        pat_crores=180.0,
+        pat_growth_yoy_pct=25.0,
+        ebitda_margin_pct=18.0,
+        eps_inr=15.0,
+        pit_status="VERIFIED",
+    )
+
+    # period_end_date (2026-03-31) <= as_of_date (2026-04-01), but available_at is 2026-05-15
+    filtered = PointInTimeFilter.filter_quarterly_financials([rec], date(2026, 4, 1))
+    assert len(filtered) == 0
+
+
+def test_missing_fundamental_availability_fails_closed():
+    """20. Test record with missing filing_date and available_at (PIT_UNVERIFIED) is rejected for historical PIT use."""
+    rec_unverified = QuarterlyFinancials(
+        symbol="TRENT",
+        period_end_date=date(2026, 3, 31),
+        filing_date=None,
+        available_at=None,
+        sales_crores=1200.0,
+        sales_growth_yoy_pct=20.0,
+        pat_crores=180.0,
+        pat_growth_yoy_pct=25.0,
+        ebitda_margin_pct=18.0,
+        eps_inr=15.0,
+        pit_status="PIT_UNVERIFIED",
+    )
+
+    filtered = PointInTimeFilter.filter_quarterly_financials([rec_unverified], date(2026, 6, 1))
+    assert len(filtered) == 0
+
+
+def test_future_fundamental_mutation_does_not_change_result_at_T():
+    """21. Test mutating future fundamental records (available_at > T) leaves FundamentalAnalysisAgent score at T identical."""
+    import asyncio
+    from src.agents.fundamental_agent import FundamentalAnalysisAgent
+    from src.core.evidence import EvidenceGraph
+    from src.core.models import SymbolMetadata
+
+    t_date = date(2026, 5, 10)
+
+    q1_baseline = QuarterlyFinancials(
+        symbol="TRENT",
+        period_end_date=date(2025, 12, 31),
+        filing_date=date(2026, 2, 10),
+        available_at=date(2026, 2, 10),
+        sales_crores=1000.0,
+        sales_growth_yoy_pct=15.0,
+        pat_crores=150.0,
+        pat_growth_yoy_pct=20.0,
+        ebitda_margin_pct=18.0,
+        eps_inr=12.0,
+        pit_status="VERIFIED",
+    )
+
+    q2_future_orig = QuarterlyFinancials(
+        symbol="TRENT",
+        period_end_date=date(2026, 3, 31),
+        filing_date=date(2026, 5, 25),  # Available after T (2026-05-10)
+        available_at=date(2026, 5, 25),
+        sales_crores=1200.0,
+        sales_growth_yoy_pct=20.0,
+        pat_crores=180.0,
+        pat_growth_yoy_pct=25.0,
+        ebitda_margin_pct=19.0,
+        eps_inr=15.0,
+        pit_status="VERIFIED",
+    )
+
+    q2_future_mut = q2_future_orig.model_copy(update={
+        "sales_growth_yoy_pct": -80.0,
+        "pat_growth_yoy_pct": -90.0,
+        "pat_crores": 10.0,
+    })
+
+    agent = FundamentalAnalysisAgent()
+    meta = SymbolMetadata(symbol="TRENT", company_name="Trent Ltd", sector="Retail")
+    dummy_df = pd.DataFrame()
+
+    # Baseline run at T
+    ctx_base = {"quarterly_financials": [q1_baseline, q2_future_orig], "as_of_date": t_date}
+    out_base = asyncio.run(agent._analyze(meta, dummy_df, EvidenceGraph(), "run1", ctx_base))
+
+    # Mutated run at T
+    ctx_mut = {"quarterly_financials": [q1_baseline, q2_future_mut], "as_of_date": t_date}
+    out_mut = asyncio.run(agent._analyze(meta, dummy_df, EvidenceGraph(), "run2", ctx_mut))
+
+    assert out_base.score == out_mut.score
+    assert out_base.signal == out_mut.signal
+    assert out_base.metrics == out_mut.metrics
+
+
+def test_latest_available_fundamental_selected_by_availability():
+    """22. Test latest quarterly record is selected strictly by available_at <= as_of_date, not period_end_date."""
+    q1 = QuarterlyFinancials(
+        symbol="TRENT",
+        period_end_date=date(2025, 12, 31),
+        filing_date=date(2026, 2, 15),
+        available_at=date(2026, 2, 15),
+        sales_crores=1000.0,
+        sales_growth_yoy_pct=15.0,
+        pat_crores=150.0,
+        pat_growth_yoy_pct=15.0,
+        ebitda_margin_pct=17.0,
+        eps_inr=12.0,
+        pit_status="VERIFIED",
+    )
+
+    q2 = QuarterlyFinancials(
+        symbol="TRENT",
+        period_end_date=date(2026, 3, 31),
+        filing_date=date(2026, 5, 15),
+        available_at=date(2026, 5, 15),
+        sales_crores=1200.0,
+        sales_growth_yoy_pct=25.0,
+        pat_crores=200.0,
+        pat_growth_yoy_pct=30.0,
+        ebitda_margin_pct=19.0,
+        eps_inr=16.0,
+        pit_status="VERIFIED",
+    )
+
+    records = [q1, q2]
+
+    # D5 (2026-01-01): neither available
+    assert len(PointInTimeFilter.filter_quarterly_financials(records, date(2026, 1, 1))) == 0
+
+    # D10 (2026-02-15): Q1 available
+    f_d10 = PointInTimeFilter.filter_quarterly_financials(records, date(2026, 2, 15))
+    assert len(f_d10) == 1
+    assert f_d10[0].period_end_date == date(2025, 12, 31)
+
+    # D25 (2026-04-30): Q1 available only (Q2 period ended 03-31 but filing is 05-15!)
+    f_d25 = PointInTimeFilter.filter_quarterly_financials(records, date(2026, 4, 30))
+    assert len(f_d25) == 1
+    assert f_d25[0].period_end_date == date(2025, 12, 31)
+
+    # D30 (2026-05-15): both Q1 and Q2 available
+    f_d30 = PointInTimeFilter.filter_quarterly_financials(records, date(2026, 5, 15))
+    assert len(f_d30) == 2
+
+
+def test_future_revision_is_not_visible_before_availability():
+    """23. Test a revised filing is NOT visible before its revision available_at date."""
+    orig_filing = QuarterlyFinancials(
+        symbol="TRENT",
+        period_end_date=date(2026, 3, 31),
+        filing_date=date(2026, 5, 10),
+        available_at=date(2026, 5, 10),
+        sales_crores=1000.0,
+        sales_growth_yoy_pct=15.0,
+        pat_crores=150.0,
+        pat_growth_yoy_pct=20.0,
+        ebitda_margin_pct=17.0,
+        eps_inr=12.0,
+        pit_status="VERIFIED",
+    )
+
+    revised_filing = QuarterlyFinancials(
+        symbol="TRENT",
+        period_end_date=date(2026, 3, 31),
+        filing_date=date(2026, 5, 25),  # Revision filed on May 25
+        available_at=date(2026, 5, 25),
+        sales_crores=1050.0,
+        sales_growth_yoy_pct=20.0,
+        pat_crores=160.0,
+        pat_growth_yoy_pct=25.0,
+        ebitda_margin_pct=18.0,
+        eps_inr=13.0,
+        pit_status="VERIFIED",
+    )
+
+    records = [orig_filing, revised_filing]
+
+    # At 2026-05-15: Original filing visible, revision NOT visible
+    f_may15 = PointInTimeFilter.filter_quarterly_financials(records, date(2026, 5, 15))
+    assert len(f_may15) == 1
+    assert f_may15[0].pat_growth_yoy_pct == 20.0
+
+    # At 2026-05-25: Revision becomes visible
+    f_may25 = PointInTimeFilter.filter_quarterly_financials(records, date(2026, 5, 25))
+    assert len(f_may25) == 2
+
+
+def test_historical_query_cannot_return_current_fallback_data():
+    """24. Test historical query filtered by PointInTimeFilter rejects synthetic fallback data without available_at."""
+    import asyncio
+    from src.data.fundamental_provider import ScreenerFundamentalProvider
+
+    provider = ScreenerFundamentalProvider()
+    # Provider returns synthetic fallback when cache is missing
+    fallback_records = asyncio.run(provider.get_quarterly_financials("UNKNOWN_SYM"))
+
+    assert len(fallback_records) == 1
+    assert fallback_records[0].pit_status == "PIT_UNVERIFIED"
+    assert fallback_records[0].available_at is None
+
+    # Filtering for historical date must return 0 records
+    historical_pit_records = PointInTimeFilter.filter_quarterly_financials(fallback_records, date(2025, 6, 1))
+    assert len(historical_pit_records) == 0
+
+
+def test_provider_unverified_records_not_represented_as_pit_safe():
+    """25. Test ScreenerFundamentalProvider marks records without filing_date as PIT_UNVERIFIED."""
+    import asyncio
+    from src.data.fundamental_provider import ScreenerFundamentalProvider
+
+    provider = ScreenerFundamentalProvider()
+    records = asyncio.run(provider.get_quarterly_financials("SYNTHETIC_TEST"))
+
+    for r in records:
+        if r.available_at is None and r.filing_date is None:
+            assert r.pit_status == "PIT_UNVERIFIED"
+
