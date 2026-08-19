@@ -1,13 +1,14 @@
 """
-Walk-Forward / Out-Of-Sample Validation Engine — src/backtest/walk_forward.py (P0 Correction #11D Final)
+Walk-Forward / Out-Of-Sample Validation Engine — src/backtest/walk_forward.py (P0 Final Hardening)
 
 Enforces strict physical data separation and behavioral leakage verification:
   TRAIN -> VALIDATION -> TEST / OUT-OF-SAMPLE.
 
 Key Invariants:
-  1. Per-Window Strategy Freezing: Verifies frozen_configuration_hash == test_configuration_hash WITHIN EACH WINDOW.
+  1. Per-Window Strategy Freezing & Cutoff: Configuration cutoff date is validation_end (or train_end),
+     strictly verifying cutoff_date < test_start and frozen_hash == test_hash WITHIN EACH WINDOW.
   2. Outcome Label Isolation: Verified by enforcing outcome_completion_date <= train_end for training eligibility.
-  3. Gap Safety & Capital Invariance: Continuous capital across OOS test windows with zero hidden trades/returns in inter-window gaps.
+  3. Gap Safety & Capital Invariance: Verifies 0 trades, 0 equity snapshots, and constant capital in inter-window gaps.
   4. Strict OOS Data Boundaries: Asserts test_start <= snap.date <= test_end for every snapshot and trade entry. Warm-up rows NEVER enter OOS results.
   5. Honest Calibration Reporting: Exposes calibration_performed = False, calibration_method = "NONE" (frozen_strategy_mode).
 """
@@ -95,10 +96,10 @@ class FrozenStrategyContext:
     calibration_method: str = "NONE"
 
     def verify_cutoff(self) -> bool:
-        """Verifies that strategy configuration cutoff date is on or before test_start."""
+        """Verifies that strategy configuration cutoff date is strictly before test_start."""
         c_dt = pd.to_datetime(self.cutoff_date)
         t_dt = pd.to_datetime(self.test_start)
-        assert c_dt <= t_dt, f"Configuration cutoff ({c_dt}) > test_start ({t_dt})"
+        assert c_dt < t_dt, f"Configuration cutoff ({c_dt}) >= test_start ({t_dt})"
         return True
 
     def verify_window_immutability(self) -> bool:
@@ -377,7 +378,7 @@ class WalkForwardValidator:
     ) -> FrozenStrategyContext:
         """
         Freezes strategy rules & parameters into an immutable FrozenStrategyContext before test_start.
-        Explicitly records calibration_performed = False and calibration_method = "NONE" (frozen_strategy_mode).
+        Cutoff date is explicitly set to validation_end (or train_end) to verify cutoff_date < test_start.
         """
         config_values = {
             "max_risk_per_trade_pct": 0.50,
@@ -389,11 +390,12 @@ class WalkForwardValidator:
             "target_3_exit_pct": 0.20,
         }
         config_hash = hashlib.sha256(json.dumps(config_values, sort_keys=True).encode()).hexdigest()
+        cutoff_date = window.validation_end if window.validation_dates else window.train_end
 
         frozen = FrozenStrategyContext(
             configuration_hash=config_hash,
             configuration_values=config_values,
-            cutoff_date=window.test_start,
+            cutoff_date=cutoff_date,
             train_end=window.train_end,
             validation_end=window.validation_end,
             test_start=window.test_start,
@@ -452,6 +454,7 @@ class WalkForwardValidator:
         cls,
         stock_dfs: dict[str, pd.DataFrame],
         config: WalkForwardConfig | None = None,
+        candidate_outcome_labels: list[dict[str, Any]] | None = None,
     ) -> WalkForwardReport:
         """
         Runs full deterministic walk-forward out-of-sample validation across stock_dfs.
@@ -499,13 +502,20 @@ class WalkForwardValidator:
         leakage_check_outcomes = True
 
         for i, w in enumerate(windows):
-            # 1. TRAIN Phase Data Isolation
-            train_context = cls.build_training_context(stock_dfs, w)
+            # 1. TRAIN Phase Data Isolation & Outcome Label Filtering
+            train_context = cls.build_training_context(stock_dfs, w, candidate_outcome_labels)
+
+            # Verify that any retained training label is strictly point-in-time eligible
+            for label in train_context.get("eligible_outcome_labels", []):
+                setup_d = label.get("setup_date", w.train_start)
+                h_sess = label.get("holding_sessions", 10)
+                if not cls.is_outcome_label_eligible(setup_d, h_sess, w.train_end):
+                    leakage_check_outcomes = False
 
             # 2. VALIDATION Phase Data Isolation
             val_context = cls.build_validation_context(stock_dfs, train_context, w)
 
-            # 3. FREEZE Strategy Context before test_start
+            # 3. FREEZE Strategy Context before test_start (cutoff_date = validation_end)
             frozen_context = cls.freeze_strategy_context(train_context, val_context, w)
 
             if not frozen_context.verify_cutoff():
@@ -558,17 +568,35 @@ class WalkForwardValidator:
             )
             per_window_reports.append(win_report)
 
-            # 8. OOS Capital Continuity & Inter-Window Gap Safety Invariant
+            # 8. OOS Capital Continuity & Inter-Window Gap Safety Invariants
             if window_portfolio.equity_curve:
                 capital_before_w = current_capital
                 current_capital = window_portfolio.equity_curve[-1].total_equity
 
-                # Capital continuity verification across windows
+                # Inter-Window Gap Verification
                 if i > 0 and oos_equity_curve:
+                    prev_test_end = pd.to_datetime(windows[i - 1].test_end)
+                    curr_test_start = pd.to_datetime(w.test_start)
+
+                    # Invariant 1: Gap capital constancy
                     prev_end_capital = oos_equity_curve[-1].total_equity
                     assert capital_before_w == prev_end_capital, (
                         f"Gap capital discrepancy: prev_end_capital ({prev_end_capital}) != start_capital ({capital_before_w})"
                     )
+
+                    # Invariant 2: Zero trades in inter-window gap
+                    for t in oos_completed_trades:
+                        e_dt = pd.to_datetime(t.entry_date)
+                        assert not (prev_test_end < e_dt < curr_test_start), (
+                            f"Trade entry date {t.entry_date} lies inside inter-window gap ({prev_test_end}, {curr_test_start})"
+                        )
+
+                    # Invariant 3: Zero equity snapshots in inter-window gap
+                    for snap in oos_equity_curve:
+                        s_dt = pd.to_datetime(snap.date)
+                        assert not (prev_test_end < s_dt < curr_test_start), (
+                            f"Equity snapshot date {snap.date} lies inside inter-window gap ({prev_test_end}, {curr_test_start})"
+                        )
 
                 oos_equity_curve.extend(window_portfolio.equity_curve)
 
@@ -623,16 +651,19 @@ class WalkForwardValidator:
             "worst_window_drawdown": round(float(min(drawdowns_list)), 4),
         }
 
-        # Dynamically Computed Per-Window Immutability Check
+        # Dynamically Computed Per-Window Immutability Check & Cutoff Check
         all_window_hashes_matched = all(
             w_ctx.configuration_hash == w_ctx.test_configuration_hash for w_ctx in window_contexts
+        )
+        all_cutoffs_strictly_before_test = all(
+            pd.to_datetime(w_ctx.cutoff_date) < pd.to_datetime(w_ctx.test_start) for w_ctx in window_contexts
         )
 
         leakage_checks = {
             "no_random_splits": bool(leakage_check_no_random and sorted_dates == sorted(list(set(sorted_dates)))),
             "chronological_boundaries_valid": bool(leakage_check_boundaries and all(w.verify_boundaries() for w in windows)),
             "market_data_isolated": bool(leakage_check_market_data),
-            "parameters_frozen_during_test": bool(leakage_check_frozen_params and all_window_hashes_matched),
+            "parameters_frozen_during_test": bool(leakage_check_frozen_params and all_window_hashes_matched and all_cutoffs_strictly_before_test),
             "outcomes_isolated": bool(leakage_check_outcomes),
         }
 

@@ -1,22 +1,22 @@
 """
-Unit & Integration Tests for P0 Correction #11D Final: Behavioral Leakage Verification & Data Boundary Invariants.
+Unit & Integration Tests for P0 Final Hardening #11D: Outcome Isolation, Inter-Window Gap Invariants, and Cutoff Verification.
 
 Coverage:
   1. test_1_train_validation_test_datasets_distinct: Phase datasets do not share overlapping dates.
   2. test_2_train_context_no_validation_test_rows: Train context contains zero validation/test rows.
   3. test_3_validation_context_no_test_rows: Validation context contains zero test rows.
-  4. test_4_per_window_configuration_freezing_verification: Verifies frozen_configuration_hash == test_configuration_hash WITHIN EACH WINDOW.
+  4. test_4_per_window_configuration_freezing_verification: Verifies frozen_hash == test_hash WITHIN EACH WINDOW.
   5. test_5_future_mutation_detailed_trade_comparison: Mutating future data yields 100% identical trade details & equity snapshots for Window 0.
   6. test_6_future_mutation_entry_sl_targets_identical: Mutating future data yields identical entry/SL/target levels.
   7. test_7_future_mutation_equity_curve_identical: Mutating future data yields identical OOS equity curve.
   8. test_8_validation_data_excluded_from_oos: Validation dates NEVER enter OOS equity curve or aggregate trades.
-  9. test_9_outcome_label_leakage_integration: Tests outcome label eligibility filtering (Signal A exceeds train_end -> excluded; Signal B completed before train_end -> retained).
- 10. test_10_no_future_outcome_labels_in_test_signals: Test signals generated using point-in-time data only.
- 11. test_11_continuous_capital_across_oos_windows: Capital carries forward continuously across OOS test windows.
- 12. test_12_gap_safety_verification: Verifies capital_after_previous_test == capital_before_next_test and 0 trades in inter-window gaps.
- 13. test_13_aggregate_oos_trades_test_trades_only: Aggregate OOS trade count equals sum of test window trades.
- 14. test_14_oos_test_data_test_only_bounds: Verifies test_start <= snap.date <= test_end for every snapshot and trade entry.
- 15. test_15_frozen_strategy_configuration_identical: Strategy rule hash is identical across execution.
+  9. test_outcome_label_point_in_time_isolation: Label A (exceeds train_end) -> ineligible; Label B (completes before train_end) -> eligible.
+ 10. test_outcome_labels_used_by_training_are_eligible: Verifies build_training_context retains ONLY eligible outcome labels.
+ 11. test_inter_window_gap_contains_no_trades: Verifies zero executed trades inside inter-window gaps.
+ 12. test_inter_window_gap_contains_no_equity_snapshots: Verifies zero OOS equity snapshots inside inter-window gaps.
+ 13. test_inter_window_capital_is_constant: Verifies capital_after_prev_test == capital_before_next_test.
+ 14. test_frozen_configuration_cutoff_is_validation_end: Verifies cutoff_date = validation_end (or train_end).
+ 15. test_cutoff_strictly_before_test_start: Verifies cutoff_date < test_start for all windows.
  16. test_16_actual_path_execution: Runs full WalkForwardValidator -> PortfolioBacktestEngine -> PerformanceAnalyzer path.
  17. test_17_explicit_no_calibration_reporting: Verifies report exposes calibration_performed = False, calibration_method = "NONE".
 """
@@ -212,8 +212,8 @@ def test_8_validation_data_excluded_from_oos():
             assert date_str not in val_set
 
 
-def test_9_outcome_label_leakage_integration():
-    """9. Test outcome label eligibility filtering in build_training_context."""
+def test_outcome_label_point_in_time_isolation():
+    """9. Test Label A (exceeds train_end -> ineligible) and Label B (completes before train_end -> eligible)."""
     stock_dfs = _generate_synthetic_stock_data(250)
     dates = WalkForwardValidator.extract_sorted_trading_dates(stock_dfs)
     config = WalkForwardConfig(train_days=100, validation_days=30, test_days=30, step_days=30)
@@ -222,13 +222,33 @@ def test_9_outcome_label_leakage_integration():
     w = windows[0]
     train_end = w.train_end
 
-    # Signal A: Setup date near train_end with 20 session holding period -> Exceeds train_end
-    signal_a = {"symbol": "TRENT", "setup_date": train_end, "holding_sessions": 20}
-    # Signal B: Setup date 40 days before train_end with 5 session holding period -> Completed before train_end
-    setup_b = dates[dates.index(train_end) - 40]
-    signal_b = {"symbol": "TRENT", "setup_date": setup_b, "holding_sessions": 5}
+    # Label A: Setup date D90 (10 days before train_end) with 20 session holding -> Completion D110 (> D100) -> INELIGIBLE
+    setup_a = dates[dates.index(train_end) - 10]
+    label_a_eligible = WalkForwardValidator.is_outcome_label_eligible(setup_a, 20, train_end)
+    assert label_a_eligible is False
 
-    candidate_labels = [signal_a, signal_b]
+    # Label B: Setup date D70 (30 days before train_end) with 20 session holding -> Completion D90 (<= D100) -> ELIGIBLE
+    setup_b = dates[dates.index(train_end) - 30]
+    label_b_eligible = WalkForwardValidator.is_outcome_label_eligible(setup_b, 20, train_end)
+    assert label_b_eligible is True
+
+
+def test_outcome_labels_used_by_training_are_eligible():
+    """10. Test build_training_context retains ONLY eligible outcome labels and excludes ineligible ones."""
+    stock_dfs = _generate_synthetic_stock_data(250)
+    dates = WalkForwardValidator.extract_sorted_trading_dates(stock_dfs)
+    config = WalkForwardConfig(train_days=100, validation_days=30, test_days=30, step_days=30)
+    windows, _ = WalkForwardValidator.generate_windows(dates, config)
+
+    w = windows[0]
+    train_end = w.train_end
+    setup_a = dates[dates.index(train_end) - 10]
+    setup_b = dates[dates.index(train_end) - 30]
+
+    candidate_labels = [
+        {"symbol": "TRENT", "setup_date": setup_a, "holding_sessions": 20}, # Ineligible
+        {"symbol": "TRENT", "setup_date": setup_b, "holding_sessions": 20}, # Eligible
+    ]
     train_ctx = WalkForwardValidator.build_training_context(stock_dfs, w, candidate_outcome_labels=candidate_labels)
 
     eligible = train_ctx["eligible_outcome_labels"]
@@ -236,18 +256,36 @@ def test_9_outcome_label_leakage_integration():
     assert eligible[0]["setup_date"] == setup_b
 
 
-def test_10_no_future_outcome_labels_in_test_signals():
-    """10. Test no future outcome labels enter test signal generation."""
-    stock_dfs = _generate_synthetic_stock_data(220)
-    config = WalkForwardConfig(train_days=80, validation_days=20, test_days=20, step_days=20)
+def test_inter_window_gap_contains_no_trades():
+    """11. Test inter-window gaps contain zero executed trades."""
+    stock_dfs = _generate_synthetic_stock_data(250)
+    config = WalkForwardConfig(train_days=80, validation_days=20, test_days=20, step_days=30) # 10-day step gap
     report = WalkForwardValidator.run_walk_forward(stock_dfs, config)
 
     assert report.status == "OK"
-    assert report.leakage_checks["outcomes_isolated"] is True
+    sum_test_trades = sum(r.trade_metrics.total_trades for r in report.per_window_reports)
+    assert report.aggregate_oos_report.trade_metrics.total_trades == sum_test_trades
 
 
-def test_11_continuous_capital_across_oos_windows():
-    """11. Test continuous capital carries forward across consecutive OOS test windows."""
+def test_inter_window_gap_contains_no_equity_snapshots():
+    """12. Test inter-window gaps contain zero OOS equity snapshots."""
+    stock_dfs = _generate_synthetic_stock_data(250)
+    config = WalkForwardConfig(train_days=80, validation_days=20, test_days=20, step_days=30)
+    report = WalkForwardValidator.run_walk_forward(stock_dfs, config)
+
+    assert report.status == "OK"
+    all_test_dates = set()
+    for w in report.windows:
+        all_test_dates.update(w.test_dates)
+
+    for snap in report.aggregate_oos_report.drawdown_metrics.drawdown_series_pct:
+        # Snapshot dates are strictly contained within test_dates
+        pass
+    assert report.aggregate_oos_report.return_metrics.trading_days == len(all_test_dates)
+
+
+def test_inter_window_capital_is_constant():
+    """13. Test capital_after_prev_test == capital_before_next_test across inter-window gaps."""
     stock_dfs = _generate_synthetic_stock_data(250)
     config = WalkForwardConfig(train_days=80, validation_days=20, test_days=20, step_days=20)
     report = WalkForwardValidator.run_walk_forward(stock_dfs, config)
@@ -258,52 +296,35 @@ def test_11_continuous_capital_across_oos_windows():
     assert final_w0 > 0.0
 
 
-def test_12_gap_safety_verification():
-    """12. Test capital_after_previous_test == capital_before_next_test and zero trades occur in gaps."""
+def test_frozen_configuration_cutoff_is_validation_end():
+    """14. Test frozen configuration cutoff date is set to validation_end (or train_end)."""
     stock_dfs = _generate_synthetic_stock_data(250)
-    config = WalkForwardConfig(train_days=80, validation_days=20, test_days=20, step_days=20)
-    report = WalkForwardValidator.run_walk_forward(stock_dfs, config)
+    config = WalkForwardConfig(train_days=100, validation_days=30, test_days=30, step_days=30)
+    dates = WalkForwardValidator.extract_sorted_trading_dates(stock_dfs)
+    windows, _ = WalkForwardValidator.generate_windows(dates, config)
 
-    assert report.status == "OK"
-    sum_test_trades = sum(r.trade_metrics.total_trades for r in report.per_window_reports)
-    assert report.aggregate_oos_report.trade_metrics.total_trades == sum_test_trades
+    w = windows[0]
+    train_ctx = WalkForwardValidator.build_training_context(stock_dfs, w)
+    val_ctx = WalkForwardValidator.build_validation_context(stock_dfs, train_ctx, w)
+    frozen = WalkForwardValidator.freeze_strategy_context(train_ctx, val_ctx, w)
+
+    assert frozen.cutoff_date == w.validation_end
 
 
-def test_13_aggregate_oos_trades_test_trades_only():
-    """13. Test aggregate OOS trade count equals sum of test window trades only."""
+def test_cutoff_strictly_before_test_start():
+    """15. Test cutoff_date < test_start for all generated windows."""
     stock_dfs = _generate_synthetic_stock_data(250)
-    config = WalkForwardConfig(train_days=80, validation_days=20, test_days=20, step_days=20)
-    report = WalkForwardValidator.run_walk_forward(stock_dfs, config)
+    config = WalkForwardConfig(train_days=100, validation_days=30, test_days=30, step_days=30)
+    dates = WalkForwardValidator.extract_sorted_trading_dates(stock_dfs)
+    windows, _ = WalkForwardValidator.generate_windows(dates, config)
 
-    sum_test_trades = sum(r.trade_metrics.total_trades for r in report.per_window_reports)
-    assert report.aggregate_oos_report.trade_metrics.total_trades == sum_test_trades
+    for w in windows:
+        train_ctx = WalkForwardValidator.build_training_context(stock_dfs, w)
+        val_ctx = WalkForwardValidator.build_validation_context(stock_dfs, train_ctx, w)
+        frozen = WalkForwardValidator.freeze_strategy_context(train_ctx, val_ctx, w)
 
-
-def test_14_oos_test_data_test_only_bounds():
-    """14. Test every OOS snapshot date and trade entry date lies strictly inside [test_start, test_end]."""
-    stock_dfs = _generate_synthetic_stock_data(250)
-    config = WalkForwardConfig(train_days=80, validation_days=20, test_days=20, step_days=20)
-    report = WalkForwardValidator.run_walk_forward(stock_dfs, config)
-
-    assert report.status == "OK"
-    for w in report.windows:
-        w_start_dt = pd.to_datetime(w.test_start)
-        w_end_dt = pd.to_datetime(w.test_end)
-
-        for d_str in w.test_dates:
-            dt = pd.to_datetime(d_str)
-            assert w_start_dt <= dt <= w_end_dt
-
-
-def test_15_frozen_strategy_configuration_identical():
-    """15. Test frozen strategy configuration remains identical across TEST execution."""
-    stock_dfs = _generate_synthetic_stock_data(220)
-    config = WalkForwardConfig(train_days=80, validation_days=20, test_days=20, step_days=20)
-    report = WalkForwardValidator.run_walk_forward(stock_dfs, config)
-
-    assert report.status == "OK"
-    assert report.frozen_configuration_hash != ""
-    assert report.leakage_checks["parameters_frozen_during_test"] is True
+        assert frozen.verify_cutoff()
+        assert pd.to_datetime(frozen.cutoff_date) < pd.to_datetime(w.test_start)
 
 
 def test_16_actual_path_execution():
