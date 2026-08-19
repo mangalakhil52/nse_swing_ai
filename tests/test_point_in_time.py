@@ -288,43 +288,61 @@ def test_12_deterministic_repeatability_actual_signal_path():
 
 
 def test_signal_input_contains_no_future_rows():
-    """13. Test signal input contains no future rows after enforcing PIT boundary."""
+    """13. Test signal input contains no future rows after passing full DataFrame through production PIT boundary."""
     sym, df = _generate_synthetic_stock_df(150)
     as_of_idx = 100
     as_of_dt = df.iloc[as_of_idx]["timestamp"].date()
 
-    # Slice and enforce
-    pit_df = PointInTimeFilter.filter_market_data(df.iloc[: as_of_idx + 1], as_of_dt)
+    # Pass full un-truncated DataFrame (150 rows) through production PIT boundary
+    pit_df = PointInTimeFilter.filter_market_data(df, as_of_dt)
     enforced = PointInTimeFilter.enforce_pit_boundary(pit_df, as_of_dt)
 
     max_dt = pd.to_datetime(enforced["timestamp"]).max().date()
     assert max_dt <= as_of_dt
+    assert len(enforced) == as_of_idx + 1
 
 
 def test_future_ohlcv_mutation_does_not_change_signal():
-    """14. Test mutating future OHLCV (> T) cannot alter signal matched patterns or quality scores at T."""
+    """14. Test mutating future OHLCV (> T) cannot alter signal matched patterns, quality scores, or trade levels at T."""
     sym, df_orig = _generate_synthetic_stock_df(180)
     as_of_idx = 120
     as_of_dt = df_orig.iloc[as_of_idx]["timestamp"].date()
 
-    # Baseline signals at T
+    # Baseline signals at T through full production pipeline
     df_t_orig = PointInTimeFilter.filter_market_data(df_orig, as_of_dt)
     PointInTimeFilter.enforce_pit_boundary(df_t_orig, as_of_dt)
-    patterns_orig = PatternRecognizer.evaluate_all_patterns(df_t_orig)
+    features_orig = TechnicalIndicators.compute_all_indicators(df_t_orig)
+    patterns_orig = PatternRecognizer.evaluate_all_patterns(features_orig)
+    levels_orig, _ = TradeConstructionEngine.construct_trade_levels(sym, features_orig)
+
     signals_orig = [(p.pattern_type.value, p.quality_score) for p in patterns_orig if p.is_matched]
 
-    # Mutate future rows (> T)
+    # Mutate future rows (> T) substantially
     df_mut = df_orig.copy()
-    df_mut.loc[as_of_idx + 1 :, "close"] *= 10.0
+    df_mut.loc[as_of_idx + 1 :, "open"] *= 10.0
     df_mut.loc[as_of_idx + 1 :, "high"] *= 10.0
-    df_mut.loc[as_of_idx + 1 :, "volume"] *= 100
+    df_mut.loc[as_of_idx + 1 :, "low"] *= 0.1
+    df_mut.loc[as_of_idx + 1 :, "close"] *= 10.0
+    df_mut.loc[as_of_idx + 1 :, "volume"] *= 500
 
     df_t_mut = PointInTimeFilter.filter_market_data(df_mut, as_of_dt)
     PointInTimeFilter.enforce_pit_boundary(df_t_mut, as_of_dt)
-    patterns_mut = PatternRecognizer.evaluate_all_patterns(df_t_mut)
+    features_mut = TechnicalIndicators.compute_all_indicators(df_t_mut)
+    patterns_mut = PatternRecognizer.evaluate_all_patterns(features_mut)
+    levels_mut, _ = TradeConstructionEngine.construct_trade_levels(sym, features_mut)
+
     signals_mut = [(p.pattern_type.value, p.quality_score) for p in patterns_mut if p.is_matched]
 
     assert signals_orig == signals_mut
+
+    if levels_orig is not None:
+        assert levels_mut is not None
+        assert levels_orig.entry_trigger_price == levels_mut.entry_trigger_price
+        assert levels_orig.stop_loss_price == levels_mut.stop_loss_price
+        assert levels_orig.target_1 == levels_mut.target_1
+        assert levels_orig.target_2 == levels_mut.target_2
+        assert levels_orig.target_3 == levels_mut.target_3
+        assert levels_orig.position_size_shares == levels_mut.position_size_shares
 
 
 def test_future_ohlcv_mutation_does_not_change_trade_levels():
@@ -333,19 +351,19 @@ def test_future_ohlcv_mutation_does_not_change_trade_levels():
     as_of_idx = 120
     as_of_dt = df_orig.iloc[as_of_idx]["timestamp"].date()
 
-    # Baseline levels at T
     df_t_orig = PointInTimeFilter.filter_market_data(df_orig, as_of_dt)
     PointInTimeFilter.enforce_pit_boundary(df_t_orig, as_of_dt)
-    levels_orig, err_orig = TradeConstructionEngine.construct_trade_levels(sym, df_t_orig)
+    features_orig = TechnicalIndicators.compute_all_indicators(df_t_orig)
+    levels_orig, err_orig = TradeConstructionEngine.construct_trade_levels(sym, features_orig)
 
-    # Mutate future rows (> T)
     df_mut = df_orig.copy()
     df_mut.loc[as_of_idx + 1 :, "close"] *= 0.1
     df_mut.loc[as_of_idx + 1 :, "low"] *= 0.1
 
     df_t_mut = PointInTimeFilter.filter_market_data(df_mut, as_of_dt)
     PointInTimeFilter.enforce_pit_boundary(df_t_mut, as_of_dt)
-    levels_mut, err_mut = TradeConstructionEngine.construct_trade_levels(sym, df_t_mut)
+    features_mut = TechnicalIndicators.compute_all_indicators(df_t_mut)
+    levels_mut, err_mut = TradeConstructionEngine.construct_trade_levels(sym, features_mut)
 
     if levels_orig is not None:
         assert levels_mut is not None
@@ -362,22 +380,23 @@ def test_future_ohlcv_mutation_does_not_change_features_at_T():
     as_of_idx = 120
     as_of_dt = df_orig.iloc[as_of_idx]["timestamp"].date()
 
-    # Baseline features computed on PIT-safe sliced data
-    raw_sub_orig = PointInTimeFilter.filter_market_data(df_orig.iloc[: as_of_idx + 1], as_of_dt)
+    # Pass full un-truncated DataFrame through production PIT boundary
+    raw_sub_orig = PointInTimeFilter.filter_market_data(df_orig, as_of_dt)
     PointInTimeFilter.enforce_pit_boundary(raw_sub_orig, as_of_dt)
     base_features = TechnicalIndicators.compute_all_indicators(raw_sub_orig)
 
     feat_cols = ["sma_20", "ema_20", "ema_50", "rsi_14", "atr_14", "rvol_20"]
     base_values = {col: float(base_features[col].iloc[-1]) for col in feat_cols if col in base_features.columns}
 
-    # Mutate ONLY future rows (> T)
+    # Mutate ONLY future rows (> T) in full DataFrame
     df_mut = df_orig.copy()
-    df_mut.loc[as_of_idx + 1 :, "close"] *= 50.0
+    df_mut.loc[as_of_idx + 1 :, "open"] *= 50.0
     df_mut.loc[as_of_idx + 1 :, "high"] *= 50.0
-    df_mut.loc[as_of_idx + 1 :, "low"] *= 50.0
+    df_mut.loc[as_of_idx + 1 :, "low"] *= 0.05
+    df_mut.loc[as_of_idx + 1 :, "close"] *= 50.0
     df_mut.loc[as_of_idx + 1 :, "volume"] *= 500
 
-    raw_sub_mut = PointInTimeFilter.filter_market_data(df_mut.iloc[: as_of_idx + 1], as_of_dt)
+    raw_sub_mut = PointInTimeFilter.filter_market_data(df_mut, as_of_dt)
     PointInTimeFilter.enforce_pit_boundary(raw_sub_mut, as_of_dt)
     mut_features = TechnicalIndicators.compute_all_indicators(raw_sub_mut)
 
@@ -395,7 +414,7 @@ def test_pit_contract_fails_closed_on_future_row():
     as_of_idx = 100
     as_of_dt = df.iloc[as_of_idx]["timestamp"].date()
 
-    # Unfiltered DataFrame containing rows up to idx 105 (> idx 100)
+    # Intentionally pass a DataFrame containing future rows (up to idx 105 > idx 100) directly to enforce_pit_boundary
     future_df = df.iloc[: as_of_idx + 6].copy()
 
     with pytest.raises(PITViolationError) as exc_info:
