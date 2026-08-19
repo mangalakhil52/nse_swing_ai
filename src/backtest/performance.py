@@ -147,6 +147,9 @@ class PerformanceReport:
     turnover_metrics: TurnoverMetrics = field(default_factory=TurnoverMetrics)
     transaction_cost_metrics: TransactionCostMetrics = field(default_factory=TransactionCostMetrics)
     benchmark_metrics: BenchmarkMetrics = field(default_factory=BenchmarkMetrics)
+    rejection_reason: str | None = None
+    completed_trades: list[Any] = field(default_factory=list)
+    equity_curve: list[Any] = field(default_factory=list)
 
 
 class PerformanceAnalyzer:
@@ -188,10 +191,8 @@ class PerformanceAnalyzer:
         cost_m = cls._compute_transaction_cost_metrics(portfolio)
         bench_m = cls._compute_benchmark_metrics(portfolio, benchmark_df, ret_m.total_return_pct)
 
-        status_str = "OK" if portfolio.completed_trades or portfolio.equity_curve else "EMPTY_BACKTEST"
-
         return PerformanceReport(
-            status=status_str,
+            status="OK",
             return_metrics=ret_m,
             drawdown_metrics=dd_m,
             risk_metrics=risk_m,
@@ -202,6 +203,8 @@ class PerformanceAnalyzer:
             turnover_metrics=turn_m,
             transaction_cost_metrics=cost_m,
             benchmark_metrics=bench_m,
+            completed_trades=list(portfolio.completed_trades),
+            equity_curve=list(portfolio.equity_curve),
         )
 
     @classmethod

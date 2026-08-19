@@ -12,13 +12,15 @@ Coverage:
   8. test_8_validation_data_excluded_from_oos: Validation dates NEVER enter OOS equity curve or aggregate trades.
   9. test_outcome_label_point_in_time_isolation: Label A (exceeds train_end) -> ineligible; Label B (completes before train_end) -> eligible.
  10. test_outcome_labels_used_by_training_are_eligible: Verifies build_training_context retains ONLY eligible outcome labels.
- 11. test_inter_window_gap_contains_no_trades: Verifies zero executed trades inside inter-window gaps.
- 12. test_inter_window_gap_contains_no_equity_snapshots: Verifies zero OOS equity snapshots inside inter-window gaps.
- 13. test_inter_window_capital_is_constant: Verifies capital_after_prev_test == capital_before_next_test.
- 14. test_frozen_configuration_cutoff_is_validation_end: Verifies cutoff_date = validation_end (or train_end).
- 15. test_cutoff_strictly_before_test_start: Verifies cutoff_date < test_start for all windows.
- 16. test_16_actual_path_execution: Runs full WalkForwardValidator -> PortfolioBacktestEngine -> PerformanceAnalyzer path.
- 17. test_17_explicit_no_calibration_reporting: Verifies report exposes calibration_performed = False, calibration_method = "NONE".
+ 11. test_inter_window_gap_contains_no_trades: Inspects actual OOS trades and asserts no trade entry_date or exit_date lies in inter-window gap.
+ 12. test_inter_window_gap_contains_no_equity_snapshots: Inspects actual OOS equity snapshots and asserts no snapshot.date lies in inter-window gap.
+ 13. test_inter_window_capital_is_constant: Asserts prev_window.final_equity == next_window.initial_capital for EVERY consecutive window pair.
+ 14. test_gap_data_mutation_does_not_change_adjacent_oos_windows: Mutating data strictly inside inter-window gap leaves Window 0 and Window 1 identical.
+ 15. test_outcome_consumption_metadata_verification: Asserts consumed_outcome_labels_count == 0 when calibration_performed = False.
+ 16. test_frozen_configuration_cutoff_is_validation_end: Verifies cutoff_date = validation_end (or train_end).
+ 17. test_cutoff_strictly_before_test_start: Verifies cutoff_date < test_start for all windows.
+ 18. test_actual_path_execution: Runs full WalkForwardValidator -> PortfolioBacktestEngine -> PerformanceAnalyzer path.
+ 19. test_explicit_no_calibration_reporting: Verifies report exposes calibration_performed = False, calibration_method = "NONE".
 """
 
 import math
@@ -37,13 +39,13 @@ from src.backtest.walk_forward import (
 )
 
 
-def _generate_synthetic_stock_data(num_days=300, symbol="TRENT", start_date="2025-01-01"):
+def _generate_synthetic_stock_data(num_days=350, symbol="TRENT", start_date="2025-01-01"):
     dates = pd.date_range(start=start_date, periods=num_days, freq="B")
     prices = []
     curr = 1000.0
     for i in range(num_days):
         ret = 0.002 if i % 2 == 1 else -0.001
-        if i >= 150 and i < 180:
+        if (i >= 120 and i < 150) or (i >= 220 and i < 250):
             ret = 0.015  # Breakout pattern
         curr *= (1.0 + ret)
         prices.append(round(curr, 2))
@@ -257,47 +259,145 @@ def test_outcome_labels_used_by_training_are_eligible():
 
 
 def test_inter_window_gap_contains_no_trades():
-    """11. Test inter-window gaps contain zero executed trades."""
-    stock_dfs = _generate_synthetic_stock_data(250)
-    config = WalkForwardConfig(train_days=80, validation_days=20, test_days=20, step_days=30) # 10-day step gap
+    """11. Test actual OOS trade inspection asserts zero trade entry_date or exit_date lies in inter-window gaps."""
+    stock_dfs = _generate_synthetic_stock_data(350)
+    config = WalkForwardConfig(train_days=80, validation_days=20, test_days=20, step_days=30) # 10-day gap
     report = WalkForwardValidator.run_walk_forward(stock_dfs, config)
 
     assert report.status == "OK"
-    sum_test_trades = sum(r.trade_metrics.total_trades for r in report.per_window_reports)
-    assert report.aggregate_oos_report.trade_metrics.total_trades == sum_test_trades
+    assert len(report.windows) >= 2
+
+    all_oos_trades = report.oos_completed_trades
+
+    for i in range(1, len(report.windows)):
+        prev_test_end = pd.to_datetime(report.windows[i - 1].test_end)
+        curr_test_start = pd.to_datetime(report.windows[i].test_start)
+
+        for trade in all_oos_trades:
+            entry_dt = pd.to_datetime(trade.entry_date)
+            exit_dt = pd.to_datetime(trade.exit_date)
+
+            assert not (prev_test_end < entry_dt < curr_test_start), (
+                f"Trade entry {trade.entry_date} lies inside gap ({prev_test_end}, {curr_test_start})"
+            )
+            assert not (prev_test_end < exit_dt < curr_test_start), (
+                f"Trade exit {trade.exit_date} lies inside gap ({prev_test_end}, {curr_test_start})"
+            )
 
 
 def test_inter_window_gap_contains_no_equity_snapshots():
-    """12. Test inter-window gaps contain zero OOS equity snapshots."""
-    stock_dfs = _generate_synthetic_stock_data(250)
+    """12. Test actual OOS equity snapshot inspection asserts zero snapshot.date lies in inter-window gaps."""
+    stock_dfs = _generate_synthetic_stock_data(350)
+    config = WalkForwardConfig(train_days=80, validation_days=20, test_days=20, step_days=30) # 10-day gap
+    report = WalkForwardValidator.run_walk_forward(stock_dfs, config)
+
+    assert report.status == "OK"
+    assert len(report.windows) >= 2
+
+    all_snapshots = report.oos_equity_snapshots
+
+    for i in range(1, len(report.windows)):
+        prev_test_end = pd.to_datetime(report.windows[i - 1].test_end)
+        curr_test_start = pd.to_datetime(report.windows[i].test_start)
+
+        for snap in all_snapshots:
+            snap_dt = pd.to_datetime(snap.date)
+            assert not (prev_test_end < snap_dt < curr_test_start), (
+                f"Equity snapshot date {snap.date} lies inside gap ({prev_test_end}, {curr_test_start})"
+            )
+
+
+def test_inter_window_capital_is_constant():
+    """13. Test previous_window.final_equity == next_window.initial_capital for EVERY consecutive pair, plus no gap trades/snapshots."""
+    stock_dfs = _generate_synthetic_stock_data(350)
     config = WalkForwardConfig(train_days=80, validation_days=20, test_days=20, step_days=30)
     report = WalkForwardValidator.run_walk_forward(stock_dfs, config)
 
     assert report.status == "OK"
-    all_test_dates = set()
-    for w in report.windows:
-        all_test_dates.update(w.test_dates)
+    assert len(report.per_window_reports) >= 2
 
-    for snap in report.aggregate_oos_report.drawdown_metrics.drawdown_series_pct:
-        # Snapshot dates are strictly contained within test_dates
-        pass
-    assert report.aggregate_oos_report.return_metrics.trading_days == len(all_test_dates)
+    for i in range(1, len(report.per_window_reports)):
+        prev_w = report.per_window_reports[i - 1]
+        next_w = report.per_window_reports[i]
+        assert prev_w.return_metrics.final_equity == next_w.return_metrics.initial_capital
+
+    # Assert no OOS trade or equity snapshot in gap
+    for i in range(1, len(report.windows)):
+        prev_end = pd.to_datetime(report.windows[i - 1].test_end)
+        curr_start = pd.to_datetime(report.windows[i].test_start)
+        for t in report.oos_completed_trades:
+            e_dt = pd.to_datetime(t.entry_date)
+            assert not (prev_end < e_dt < curr_start)
+        for s in report.oos_equity_snapshots:
+            s_dt = pd.to_datetime(s.date)
+            assert not (prev_end < s_dt < curr_start)
 
 
-def test_inter_window_capital_is_constant():
-    """13. Test capital_after_prev_test == capital_before_next_test across inter-window gaps."""
-    stock_dfs = _generate_synthetic_stock_data(250)
+def test_gap_data_mutation_does_not_change_adjacent_oos_windows():
+    """14. Test mutating data strictly inside an inter-window gap leaves Window 0 and Window 1 identical."""
+    stock_dfs_orig = _generate_synthetic_stock_data(350)
+    config = WalkForwardConfig(train_days=80, validation_days=20, test_days=20, step_days=40)
+    report_orig = WalkForwardValidator.run_walk_forward(stock_dfs_orig, config)
+
+    assert report_orig.status == "OK"
+    assert len(report_orig.windows) >= 2
+
+    w0_end_dt = pd.to_datetime(report_orig.windows[0].test_end)
+    w1_start_dt = pd.to_datetime(report_orig.windows[1].test_start)
+
+    # Mutate ONLY rows strictly inside the GAP
+    stock_dfs_mut = _generate_synthetic_stock_data(350)
+    df_mut = stock_dfs_mut["TRENT"].copy()
+    mask_gap = (pd.to_datetime(df_mut["timestamp"]) > w0_end_dt) & (pd.to_datetime(df_mut["timestamp"]) < w1_start_dt)
+    assert mask_gap.any(), "Synthetic gap must contain data rows to mutate."
+    df_mut.loc[mask_gap, "close"] *= 5.0  # 500% price spike in gap
+    df_mut.loc[mask_gap, "high"] *= 5.0
+    stock_dfs_mut["TRENT"] = df_mut
+
+    report_mut = WalkForwardValidator.run_walk_forward(stock_dfs_mut, config)
+
+    # Compare actual Window 0 (Window A prior to gap) between report_orig and report_mut
+    w0_orig_rep = report_orig.per_window_reports[0]
+    w0_mut_rep = report_mut.per_window_reports[0]
+
+    assert w0_orig_rep.trade_metrics.total_trades == w0_mut_rep.trade_metrics.total_trades
+    assert w0_orig_rep.return_metrics.final_equity == w0_mut_rep.return_metrics.final_equity
+    assert w0_orig_rep.return_metrics.total_return_pct == w0_mut_rep.return_metrics.total_return_pct
+
+    # Detailed trade comparisons for Window 0
+    for t_orig, t_mut in zip(w0_orig_rep.completed_trades, w0_mut_rep.completed_trades):
+        assert t_orig.symbol == t_mut.symbol
+        assert t_orig.entry_date == t_mut.entry_date
+        assert t_orig.entry_price == t_mut.entry_price
+        assert t_orig.stop_loss == t_mut.stop_loss
+        assert t_orig.target_1 == t_mut.target_1
+        assert t_orig.exit_date == t_mut.exit_date
+        assert t_orig.exit_price == t_mut.exit_price
+        assert t_orig.pnl_rupees == t_mut.pnl_rupees
+
+    # Detailed equity snapshot comparisons for Window 0
+    for s_orig, s_mut in zip(w0_orig_rep.equity_curve, w0_mut_rep.equity_curve):
+        assert s_orig.date == s_mut.date
+        assert s_orig.total_equity == s_mut.total_equity
+        assert s_orig.cash_available == s_mut.cash_available
+        assert s_orig.market_value == s_mut.market_value
+
+
+def test_outcome_consumption_metadata_verification():
+    """15. Test consumed_outcome_labels_count == 0 when calibration_performed = False."""
+    stock_dfs = _generate_synthetic_stock_data(220)
     config = WalkForwardConfig(train_days=80, validation_days=20, test_days=20, step_days=20)
     report = WalkForwardValidator.run_walk_forward(stock_dfs, config)
 
     assert report.status == "OK"
-    assert len(report.per_window_reports) >= 2
-    final_w0 = report.per_window_reports[0].return_metrics.final_equity
-    assert final_w0 > 0.0
+    assert report.calibration_performed is False
+    assert report.calibration_method == "NONE"
+    assert report.consumed_outcome_labels_count == 0
+    assert report.leakage_checks["outcomes_isolated"] is True
 
 
 def test_frozen_configuration_cutoff_is_validation_end():
-    """14. Test frozen configuration cutoff date is set to validation_end (or train_end)."""
+    """16. Test frozen configuration cutoff date is set to validation_end (or train_end)."""
     stock_dfs = _generate_synthetic_stock_data(250)
     config = WalkForwardConfig(train_days=100, validation_days=30, test_days=30, step_days=30)
     dates = WalkForwardValidator.extract_sorted_trading_dates(stock_dfs)
@@ -312,7 +412,7 @@ def test_frozen_configuration_cutoff_is_validation_end():
 
 
 def test_cutoff_strictly_before_test_start():
-    """15. Test cutoff_date < test_start for all generated windows."""
+    """17. Test cutoff_date < test_start for all generated windows."""
     stock_dfs = _generate_synthetic_stock_data(250)
     config = WalkForwardConfig(train_days=100, validation_days=30, test_days=30, step_days=30)
     dates = WalkForwardValidator.extract_sorted_trading_dates(stock_dfs)
@@ -327,8 +427,8 @@ def test_cutoff_strictly_before_test_start():
         assert pd.to_datetime(frozen.cutoff_date) < pd.to_datetime(w.test_start)
 
 
-def test_16_actual_path_execution():
-    """16. Test executes full path: WalkForwardValidator -> PortfolioBacktestEngine -> PerformanceAnalyzer."""
+def test_18_actual_path_execution():
+    """18. Test executes full path: WalkForwardValidator -> PortfolioBacktestEngine -> PerformanceAnalyzer."""
     stock_dfs = _generate_synthetic_stock_data(220)
     config = WalkForwardConfig(train_days=80, validation_days=20, test_days=20, step_days=20)
     report = WalkForwardValidator.run_walk_forward(stock_dfs, config)
@@ -338,8 +438,8 @@ def test_16_actual_path_execution():
     assert report.aggregate_oos_report.status == "OK"
 
 
-def test_17_explicit_no_calibration_reporting():
-    """17. Test report explicitly exposes calibration_performed = False and calibration_method = 'NONE'."""
+def test_19_explicit_no_calibration_reporting():
+    """19. Test report explicitly exposes calibration_performed = False and calibration_method = 'NONE'."""
     stock_dfs = _generate_synthetic_stock_data(220)
     config = WalkForwardConfig(train_days=80, validation_days=20, test_days=20, step_days=20)
     report = WalkForwardValidator.run_walk_forward(stock_dfs, config)

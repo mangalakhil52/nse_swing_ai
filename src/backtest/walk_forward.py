@@ -122,7 +122,12 @@ class WalkForwardReport:
     calibration_performed: bool = False
     calibration_method: str = "NONE"
     frozen_configuration_hash: str = ""
+    candidate_outcome_labels_count: int = 0
+    eligible_outcome_labels_count: int = 0
+    consumed_outcome_labels_count: int = 0
     rejection_reason: str | None = None
+    oos_completed_trades: list[Any] = field(default_factory=list)
+    oos_equity_snapshots: list[Any] = field(default_factory=list)
 
 
 @dataclass
@@ -302,6 +307,7 @@ class WalkForwardValidator:
             assert min_d >= window.train_start, f"Train data leak: {sym} has date {min_d} < train_start {window.train_start}"
 
         # Point-in-time outcome label eligibility filtering
+        candidate_cnt = len(candidate_outcome_labels) if candidate_outcome_labels else 0
         eligible_outcome_labels = []
         if candidate_outcome_labels:
             for label in candidate_outcome_labels:
@@ -310,12 +316,18 @@ class WalkForwardValidator:
                 if cls.is_outcome_label_eligible(setup_date, holding_sessions, window.train_end):
                     eligible_outcome_labels.append(label)
 
+        eligible_cnt = len(eligible_outcome_labels)
+        consumed_cnt = 0  # calibration_performed = False
+
         return {
             "window_id": window.window_id,
             "train_start": window.train_start,
             "train_end": window.train_end,
             "train_dfs": train_dfs,
             "eligible_outcome_labels": eligible_outcome_labels,
+            "candidate_outcome_labels_count": candidate_cnt,
+            "eligible_outcome_labels_count": eligible_cnt,
+            "consumed_outcome_labels_count": consumed_cnt,
         }
 
     @classmethod
@@ -493,6 +505,7 @@ class WalkForwardValidator:
         oos_completed_trades: list[Any] = []
         current_capital = config.initial_capital
         window_contexts: list[FrozenStrategyContext] = []
+        train_contexts: list[dict[str, Any]] = []
 
         # Behavioral Leakage Verifiers
         leakage_check_no_random = True
@@ -504,6 +517,7 @@ class WalkForwardValidator:
         for i, w in enumerate(windows):
             # 1. TRAIN Phase Data Isolation & Outcome Label Filtering
             train_context = cls.build_training_context(stock_dfs, w, candidate_outcome_labels)
+            train_contexts.append(train_context)
 
             # Verify that any retained training label is strictly point-in-time eligible
             for label in train_context.get("eligible_outcome_labels", []):
@@ -668,6 +682,9 @@ class WalkForwardValidator:
         }
 
         primary_hash = window_contexts[0].configuration_hash if window_contexts else ""
+        total_candidate_labels = sum(w.get("candidate_outcome_labels_count", 0) for w in train_contexts)
+        total_eligible_labels = sum(w.get("eligible_outcome_labels_count", 0) for w in train_contexts)
+        total_consumed_labels = sum(w.get("consumed_outcome_labels_count", 0) for w in train_contexts)
 
         return WalkForwardReport(
             status="OK",
@@ -680,4 +697,9 @@ class WalkForwardValidator:
             calibration_performed=False,
             calibration_method="NONE",
             frozen_configuration_hash=primary_hash,
+            candidate_outcome_labels_count=total_candidate_labels,
+            eligible_outcome_labels_count=total_eligible_labels,
+            consumed_outcome_labels_count=total_consumed_labels,
+            oos_completed_trades=oos_completed_trades,
+            oos_equity_snapshots=oos_equity_curve,
         )
