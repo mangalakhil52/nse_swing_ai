@@ -158,7 +158,15 @@ def test_point_in_time_future_news_leakage_prevented():
 def test_survivorship_safe_historical_universe():
     """P1.8: Historical universe excludes securities not listed on backtest simulation date."""
     dt_2024 = date(2024, 1, 1)
-    univ = HistoricalUniverseProvider.get_universe_for_date(dt_2024)
+    secs = [
+        SymbolMetadata(symbol="RELIANCE", company_name="Reliance Industries", listing_date=date(1995, 1, 1)),
+        SymbolMetadata(symbol="SAATVIKGL", company_name="Saatvik Green Energy", listing_date=date(2026, 2, 1)),
+    ]
+    univ = HistoricalUniverseProvider.get_universe_for_date(dt_2024, secs)
 
-    assert "SAATVIKGL" not in univ  # Listed in 2026
+    assert "SAATVIKGL" not in univ  # Listed in 2026 -> Excluded in 2024
     assert "RELIANCE" in univ
+
+    # Calling without securities fails closed
+    with pytest.raises(Exception):
+        HistoricalUniverseProvider.get_universe_for_date(dt_2024)
