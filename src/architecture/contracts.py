@@ -41,6 +41,7 @@ class ConvictionGrade(str, Enum):
     MEDIUM_CONVICTION = "MEDIUM_CONVICTION"
     LOW_CONVICTION = "LOW_CONVICTION"
     REJECTED = "REJECTED"
+    NOT_COMPUTED = "NOT_COMPUTED"
 
 
 class StructuredEvidence(BaseModel):
@@ -51,7 +52,7 @@ class StructuredEvidence(BaseModel):
     direction: SignalType
     strength: str = Field(default="MEDIUM", description="'HIGH', 'MEDIUM', 'LOW'")
     reliability: float = Field(default=1.0, ge=0.0, le=1.0)
-    pit_safe: bool = Field(default=True)
+    pit_safe: bool = Field(default=False)
 
 
 class AgentAnalysisResult(BaseModel):
@@ -66,7 +67,7 @@ class AgentAnalysisResult(BaseModel):
     risks: list[str] = Field(default_factory=list)
     catalysts: list[str] = Field(default_factory=list)
     data_quality: SourceQualityResult | DataQualityResult | None = None
-    pit_safe: bool = Field(default=True)
+    pit_safe: bool = Field(default=False)  # Unsupplied metadata is NOT implicitly trusted
     status: AgentStatus = Field(default=AgentStatus.SUCCESS)
     reasons: list[str] = Field(default_factory=list)
 
@@ -77,10 +78,11 @@ class FusionResult(BaseModel):
     decision_time: datetime | date
     bullish_evidence: list[StructuredEvidence] = Field(default_factory=list)
     bearish_evidence: list[StructuredEvidence] = Field(default_factory=list)
+    neutral_evidence: list[StructuredEvidence] = Field(default_factory=list)
     unknown_evidence: list[StructuredEvidence] = Field(default_factory=list)
     conflicts: list[str] = Field(default_factory=list)
-    aggregate_strength: float = Field(default=0.0, ge=0.0, le=100.0)
-    aggregate_confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    aggregate_strength: float | None = Field(default=None)
+    aggregate_confidence: float | None = Field(default=None)
     data_quality: DataQualityResult
     vetoes: list[str] = Field(default_factory=list)
 
@@ -90,7 +92,7 @@ class ConvictionResult(BaseModel):
     symbol: str
     decision_time: datetime | date
     grade: ConvictionGrade
-    score: float = Field(..., ge=0.0, le=100.0)
+    score: float = Field(default=0.0, ge=0.0, le=100.0)
     reasons: list[str] = Field(default_factory=list)
 
 
@@ -131,7 +133,7 @@ class CIODecision(BaseModel):
 
 
 class EvidenceFusionEngine:
-    """Combines structured agent evidence without hardcoding magic average weights."""
+    """Combines structured agent evidence without magic average weights or fake scoring models."""
 
     @classmethod
     def fuse_evidence(
@@ -143,23 +145,27 @@ class EvidenceFusionEngine:
     ) -> FusionResult:
         bullish: list[StructuredEvidence] = []
         bearish: list[StructuredEvidence] = []
+        neutral: list[StructuredEvidence] = []
         unknown: list[StructuredEvidence] = []
         conflicts: list[str] = []
         vetoes: list[str] = []
 
-        # Collect evidence across all agent results
+        # Collect evidence across all agent results without collapsing UNKNOWN and NEUTRAL
         for agent_res in agent_results:
             if not agent_res.pit_safe:
                 vetoes.append(f"AGENT_PIT_VIOLATION_{agent_res.agent_name.upper()}")
+                vetoes.append("PIT_VIOLATION")
 
             if agent_res.signal == SignalType.BULLISH:
                 bullish.extend(agent_res.evidence)
             elif agent_res.signal == SignalType.BEARISH:
                 bearish.extend(agent_res.evidence)
-            elif agent_res.signal == SignalType.UNKNOWN or agent_res.signal == SignalType.NEUTRAL:
+            elif agent_res.signal == SignalType.NEUTRAL:
+                neutral.extend(agent_res.evidence)
+            elif agent_res.signal == SignalType.UNKNOWN:
                 unknown.extend(agent_res.evidence)
 
-        # Detect agent disagreements
+        # Detect agent disagreements and preserve them explicitly
         signals = {res.agent_name: res.signal for res in agent_results}
         if SignalType.BULLISH in signals.values() and SignalType.BEARISH in signals.values():
             conflicts.append("CONTRADICTORY_SIGNALS: Agents express opposing BULLISH and BEARISH views.")
@@ -167,29 +173,26 @@ class EvidenceFusionEngine:
         # Data quality hard vetoes
         if not data_quality.pit_safe or data_quality.overall_status == DataQualityStatus.PIT_VIOLATION:
             vetoes.append("DATA_QUALITY_PIT_VIOLATION")
+            vetoes.append("PIT_VIOLATION")
 
-        valid_scores = [r.score for r in agent_results if r.signal not in (SignalType.UNKNOWN, SignalType.REJECT)]
-        agg_strength = round(sum(valid_scores) / max(len(valid_scores), 1), 1) if valid_scores else 0.0
-
-        valid_confs = [r.confidence for r in agent_results if r.signal != SignalType.UNKNOWN]
-        agg_conf = round(sum(valid_confs) / max(len(valid_confs), 1), 2) if valid_confs else 0.0
-
+        # Invariant: NO magic score averaging inside #14A
         return FusionResult(
             symbol=symbol,
             decision_time=decision_time,
             bullish_evidence=bullish,
             bearish_evidence=bearish,
+            neutral_evidence=neutral,
             unknown_evidence=unknown,
             conflicts=conflicts,
-            aggregate_strength=agg_strength,
-            aggregate_confidence=agg_conf,
+            aggregate_strength=None,  # Not computed in #14A
+            aggregate_confidence=None,  # Not computed in #14A
             data_quality=data_quality,
-            vetoes=vetoes,
+            vetoes=list(set(vetoes)),
         )
 
 
 class ConvictionEngine:
-    """Evaluates evidence strength prior to risk/CIO synthesis."""
+    """Evaluates evidence conviction contract without arbitrary strategy thresholds."""
 
     @classmethod
     def evaluate_conviction(cls, fusion_result: FusionResult) -> ConvictionResult:
@@ -202,21 +205,13 @@ class ConvictionEngine:
                 reasons=["REJECTED_DUE_TO_VETOES_OR_PIT_FAILURE"],
             )
 
-        if fusion_result.aggregate_strength >= 80.0 and fusion_result.aggregate_confidence >= 0.7:
-            grade = ConvictionGrade.HIGH_CONVICTION
-        elif fusion_result.aggregate_strength >= 60.0 and fusion_result.aggregate_confidence >= 0.5:
-            grade = ConvictionGrade.MEDIUM_CONVICTION
-        elif fusion_result.aggregate_strength >= 40.0:
-            grade = ConvictionGrade.LOW_CONVICTION
-        else:
-            grade = ConvictionGrade.REJECTED
-
+        # Contract placeholder: Conviction methodology is not computed in #14A
         return ConvictionResult(
             symbol=fusion_result.symbol,
             decision_time=fusion_result.decision_time,
-            grade=grade,
-            score=fusion_result.aggregate_strength,
-            reasons=[f"Grade assigned: {grade}"],
+            grade=ConvictionGrade.NOT_COMPUTED,
+            score=0.0,
+            reasons=["CONVICTION_METHODOLOGY_NOT_COMPUTED_IN_14A"],
         )
 
 
@@ -226,14 +221,20 @@ class CIOContract:
     @classmethod
     def evaluate_decision(cls, cio_input: CIOInput) -> CIODecision:
         # Inviolable Rule: CIO CANNOT override hard PIT violations or data quality vetoes!
-        if not cio_input.data_quality.pit_safe or cio_input.data_quality.overall_status == DataQualityStatus.PIT_VIOLATION:
+        hard_pit_vetoes = [
+            v for v in cio_input.fusion_result.vetoes
+            if v == "PIT_VIOLATION" or v == "DATA_QUALITY_PIT_VIOLATION" or v.startswith("AGENT_PIT_VIOLATION_")
+        ]
+
+        if not cio_input.data_quality.pit_safe or cio_input.data_quality.overall_status == DataQualityStatus.PIT_VIOLATION or hard_pit_vetoes:
+            all_vetoes = list(set(cio_input.fusion_result.vetoes + ["PIT_VIOLATION"]))
             return CIODecision(
                 symbol=cio_input.symbol,
                 decision_time=cio_input.decision_time,
                 decision="REJECT",
                 confidence=0.0,
-                reasons=["PIT_VIOLATION: Hard failure detected in data quality."],
-                vetoes=["PIT_VIOLATION"],
+                reasons=["HARD_PIT_VIOLATION: Cannot construct BUY decision due to hard PIT failure."],
+                vetoes=all_vetoes,
             )
 
         if not cio_input.risk_result.passed_risk_veto:
@@ -257,7 +258,7 @@ class CIOContract:
             symbol=cio_input.symbol,
             decision_time=cio_input.decision_time,
             decision=decision,
-            confidence=cio_input.fusion_result.aggregate_confidence,
+            confidence=0.0,
             reasons=cio_input.conviction_result.reasons,
             vetoes=cio_input.fusion_result.vetoes,
         )
