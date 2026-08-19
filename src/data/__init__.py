@@ -14,6 +14,12 @@ from src.data.news_provider import FinancialNewsProvider
 from src.data.validation import DataValidator
 from src.data.universe import UniverseDiscoveryEngine
 from src.data.point_in_time import PointInTimeFilter, PITContract, PITRegressionHelper, PITViolationError
+from src.data.data_quality import (
+    DataQualityStatus,
+    SourceQualityResult,
+    DataQualityResult,
+    DataQualityGate,
+)
 
 __all__ = [
     "MarketDataProvider",
@@ -31,4 +37,8 @@ __all__ = [
     "PITContract",
     "PITRegressionHelper",
     "PITViolationError",
+    "DataQualityStatus",
+    "SourceQualityResult",
+    "DataQualityResult",
+    "DataQualityGate",
 ]
