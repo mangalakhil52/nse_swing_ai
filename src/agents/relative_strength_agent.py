@@ -27,10 +27,23 @@ class RelativeStrengthAgent(BaseAgent):
         run_id: str,
         context: dict[str, Any],
     ) -> AgentOutput:
+        from datetime import date, datetime
+        from src.data.point_in_time import PointInTimeFilter
+
         symbol = symbol_meta.symbol
-        nifty_df: pd.DataFrame | None = context.get("nifty_df")
+        raw_nifty_df: pd.DataFrame | None = context.get("nifty_df")
         sector_df: pd.DataFrame | None = context.get("sector_df")
         universe_rs_scores: dict[str, float] = context.get("universe_rs_scores", {})
+
+        as_of = context.get("as_of_date") or context.get("as_of_datetime")
+        if raw_nifty_df is not None and not raw_nifty_df.empty and as_of is not None:
+            as_of_d = as_of if isinstance(as_of, (date, datetime)) else pd.to_datetime(as_of).date()
+            if isinstance(as_of_d, datetime):
+                as_of_d = as_of_d.date()
+            nifty_df = PointInTimeFilter.filter_market_data(raw_nifty_df, as_of_d)
+            PointInTimeFilter.enforce_pit_boundary(nifty_df, as_of_d)
+        else:
+            nifty_df = raw_nifty_df
 
         if df.empty or nifty_df is None or nifty_df.empty:
             return AgentOutput(

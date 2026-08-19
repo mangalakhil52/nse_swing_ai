@@ -4,6 +4,7 @@ Evaluates macro trend structure of NIFTY 50, market breadth (% above 50 SMA, A/D
 Determines system-wide risk posture (AGGRESSIVE, NORMAL, SELECTIVE, DEFENSIVE, NO_TRADE).
 """
 
+from datetime import date, datetime
 from typing import Any
 import numpy as np
 import pandas as pd
@@ -37,11 +38,23 @@ class MarketRegimeClassifier:
         advance_decline_ratio: float | None = None,
         pct_above_50_sma: float | None = None,
         india_vix: float | None = None,
+        as_of_date: date | datetime | str | None = None,
     ) -> RegimeAnalysisResult:
         """
         Evaluates Nifty 50 trend, market participation, and volatility.
+        Enforces PointInTimeFilter boundary on nifty_df if as_of_date is provided.
         Returns MarketRegime.UNKNOWN if any required market-regime input is missing.
         """
+        from datetime import date, datetime
+        from src.data.point_in_time import PointInTimeFilter
+
+        if nifty_df is not None and not nifty_df.empty and as_of_date is not None:
+            as_of_d = as_of_date if isinstance(as_of_date, (date, datetime)) else pd.to_datetime(as_of_date).date()
+            if isinstance(as_of_d, datetime):
+                as_of_d = as_of_d.date()
+            nifty_df = PointInTimeFilter.filter_market_data(nifty_df, as_of_d)
+            PointInTimeFilter.enforce_pit_boundary(nifty_df, as_of_d)
+
         if (
             nifty_df is None
             or nifty_df.empty
