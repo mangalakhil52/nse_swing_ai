@@ -1,19 +1,38 @@
 """
-Point-In-Time Data Safety & Leakage Guard Engine — src/data/point_in_time.py
+Point-In-Time Data Safety & Leakage Guard Engine — src/data/point_in_time.py (P0 #12A)
 
 Enforces central point-in-time filtering:
-  available_at <= simulation_timestamp / as_of_date
+  available_at / publication_date <= decision_time / as_of_date
+
 Guarantees zero future-information leakage in backtests and daily scans.
+Fails closed with PIT_UNVERIFIED when availability timestamp is missing.
 """
 
+from dataclasses import dataclass, field
 from datetime import date, datetime
 import logging
-from typing import Any
+from typing import Any, Callable
 import pandas as pd
 
 from src.core.models import CorporateAnnouncement, CorporateEvent, NewsArticle, QuarterlyFinancials
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class PITContract:
+    source_name: str
+    event_date: str | date
+    available_at: str | date | datetime | None
+    pit_status: str  # "VERIFIED", "UNVERIFIED", "FAIL_CLOSED"
+    leakage_risk: str  # "NONE", "LOW", "MEDIUM", "HIGH"
+
+    def is_available(self, as_of_date: date) -> bool:
+        """Determines if the record is point-in-time safe and available at as_of_date."""
+        if self.available_at is None:
+            return False
+        avail_d = self.available_at if isinstance(self.available_at, date) else pd.to_datetime(self.available_at).date()
+        return avail_d <= as_of_date
 
 
 class PointInTimeFilter:
@@ -25,8 +44,9 @@ class PointInTimeFilter:
         if df is None or df.empty or "timestamp" not in df.columns:
             return df
 
-        as_of_ts = pd.Timestamp(as_of_date)
-        df_pit = df[pd.to_datetime(df["timestamp"]).dt.date <= as_of_date].copy()
+        df_copy = df.copy()
+        df_copy["_dt"] = pd.to_datetime(df_copy["timestamp"]).dt.date
+        df_pit = df_copy[df_copy["_dt"] <= as_of_date].drop(columns=["_dt"]).copy()
         return df_pit.sort_values("timestamp").reset_index(drop=True)
 
     @classmethod
@@ -37,8 +57,20 @@ class PointInTimeFilter:
 
     @classmethod
     def filter_events(cls, events: list[CorporateEvent], as_of_date: date) -> list[CorporateEvent]:
-        """Filters corporate events announced on or before as_of_date."""
-        return [e for e in events if e.event_date >= as_of_date]
+        """
+        Filters corporate events based on explicit announcement_date / available_at.
+        Fails closed (excludes item) if availability timestamp is missing.
+        """
+        valid = []
+        for e in events:
+            avail = getattr(e, "available_at", None) or getattr(e, "announcement_date", None)
+            if avail is None:
+                logger.warning(f"PIT_UNVERIFIED: CorporateEvent for {e.symbol} on {e.event_date} lacks available_at/announcement_date.")
+                continue
+            avail_d = avail if isinstance(avail, date) else pd.to_datetime(avail).date()
+            if avail_d <= as_of_date:
+                valid.append(e)
+        return valid
 
     @classmethod
     def filter_quarterly_financials(
@@ -46,11 +78,61 @@ class PointInTimeFilter:
     ) -> list[QuarterlyFinancials]:
         """
         Filters quarterly financial results so only results filed/available on or before as_of_date are used.
+        Fails closed (excludes item) if filing_date / available_at is missing. Does NOT guess or add 45 days.
         """
         valid = []
         for f in financials:
-            # Filing date is typically within 45 days of period_end_date
-            filing_date = getattr(f, "filing_date", None) or (f.period_end_date + pd.Timedelta(days=45).date())
-            if filing_date <= as_of_date:
+            avail = getattr(f, "available_at", None) or getattr(f, "filing_date", None)
+            if avail is None:
+                logger.warning(f"PIT_UNVERIFIED: QuarterlyFinancials for {f.symbol} period_end {f.period_end_date} lacks filing_date/available_at.")
+                continue
+            avail_d = avail if isinstance(avail, date) else pd.to_datetime(avail).date()
+            if avail_d <= as_of_date:
                 valid.append(f)
         return valid
+
+
+class PITRegressionHelper:
+    """
+    Reusable regression helper that runs a function on baseline data vs future-mutated data
+    and asserts exact output identity for session as_of_date.
+    """
+
+    @classmethod
+    def verify_future_mutation_safety(
+        cls,
+        target_fn: Callable[[dict[str, pd.DataFrame], str], Any],
+        stock_dfs: dict[str, pd.DataFrame],
+        as_of_date_str: str,
+        price_multiplier: float = 5.0,
+    ) -> tuple[bool, Any, Any]:
+        """
+        Runs target_fn(stock_dfs, as_of_date_str).
+        Mutates ONLY rows strictly > as_of_date_str.
+        Runs target_fn(mutated_dfs, as_of_date_str).
+        Returns (is_identical, baseline_result, mutated_result).
+        """
+        as_of_dt = pd.to_datetime(as_of_date_str)
+
+        # 1. Run baseline
+        baseline_result = target_fn(stock_dfs, as_of_date_str)
+
+        # 2. Build mutated dataset
+        mutated_dfs: dict[str, pd.DataFrame] = {}
+        for sym, df in stock_dfs.items():
+            df_mut = df.copy()
+            if "timestamp" in df_mut.columns:
+                mask_future = pd.to_datetime(df_mut["timestamp"]) > as_of_dt
+            else:
+                mask_future = pd.to_datetime(df_mut.index) > as_of_dt
+
+            if mask_future.any():
+                df_mut.loc[mask_future, "close"] *= price_multiplier
+                df_mut.loc[mask_future, "high"] *= price_multiplier
+            mutated_dfs[sym] = df_mut
+
+        # 3. Run mutated
+        mutated_result = target_fn(mutated_dfs, as_of_date_str)
+
+        is_identical = (baseline_result == mutated_result)
+        return is_identical, baseline_result, mutated_result

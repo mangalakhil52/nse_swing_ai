@@ -115,6 +115,8 @@ class MarketBreadthData(BaseDataModel):
 class QuarterlyFinancials(BaseDataModel):
     symbol: str
     period_end_date: date
+    filing_date: date | None = Field(default=None, description="Actual regulatory filing date")
+    available_at: date | None = Field(default=None, description="Public availability timestamp")
     sales_crores: float
     sales_growth_yoy_pct: float
     pat_crores: float
@@ -122,6 +124,7 @@ class QuarterlyFinancials(BaseDataModel):
     ebitda_margin_pct: float
     eps_inr: float
     data_source: str = Field(default="SCREENER_API")
+    pit_status: str = Field(default="PIT_UNVERIFIED")
 
 
 class AnnualRatios(BaseDataModel):
@@ -134,6 +137,7 @@ class AnnualRatios(BaseDataModel):
     cfo_to_pat_ratio: float
     working_capital_days: float | None = None
     fundamental_grade: FundamentalGrade = Field(default=FundamentalGrade.GOOD)
+    available_at: date | None = Field(default=None)
 
 
 class ShareholdingPattern(BaseDataModel):
@@ -145,6 +149,7 @@ class ShareholdingPattern(BaseDataModel):
     dii_pct: float = Field(default=0.0, ge=0.0, le=100.0)
     public_pct: float = Field(default=0.0, ge=0.0, le=100.0)
     promoter_change_quarterly_pct: float = Field(default=0.0)
+    available_at: date | None = Field(default=None)
 
 
 class NewsArticle(BaseDataModel):
@@ -167,6 +172,7 @@ class CorporateAnnouncement(BaseDataModel):
     headline: str
     category: str
     broadcast_timestamp: datetime
+    available_at: datetime | None = Field(default=None)
     exchange: str = "NSE"
     attachment_url: str | None = None
 
@@ -175,6 +181,8 @@ class CorporateEvent(BaseDataModel):
     symbol: str
     event_type: str = Field(..., description="e.g. 'BOARD_MEETING_RESULTS', 'DIVIDEND'")
     event_date: date
+    announcement_date: date | None = Field(default=None)
+    available_at: date | None = Field(default=None)
     purpose: str
 
 
