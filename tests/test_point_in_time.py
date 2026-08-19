@@ -308,33 +308,39 @@ def test_future_ohlcv_mutation_does_not_change_signal():
     as_of_idx = 120
     as_of_dt = df_orig.iloc[as_of_idx]["timestamp"].date()
 
-    # Baseline signals at T through full production pipeline
-    df_t_orig = PointInTimeFilter.filter_market_data(df_orig, as_of_dt)
-    PointInTimeFilter.enforce_pit_boundary(df_t_orig, as_of_dt)
-    features_orig = TechnicalIndicators.compute_all_indicators(df_t_orig)
+    # 1. Baseline path execution through full production boundary
+    pit_orig = PointInTimeFilter.filter_market_data(df_orig, as_of_dt)
+    PointInTimeFilter.enforce_pit_boundary(pit_orig, as_of_dt)
+    assert pd.to_datetime(pit_orig["timestamp"]).max().date() <= as_of_dt
+
+    features_orig = TechnicalIndicators.compute_all_indicators(pit_orig)
     patterns_orig = PatternRecognizer.evaluate_all_patterns(features_orig)
     levels_orig, _ = TradeConstructionEngine.construct_trade_levels(sym, features_orig)
 
-    signals_orig = [(p.pattern_type.value, p.quality_score) for p in patterns_orig if p.is_matched]
+    signals_orig = [(p.pattern_type.value, p.is_matched, p.quality_score) for p in patterns_orig]
 
-    # Mutate future rows (> T) substantially
+    # 2. Extreme mutation ONLY for rows > T (open*5, high*5, low*0.2, close*5, volume*10)
     df_mut = df_orig.copy()
-    df_mut.loc[as_of_idx + 1 :, "open"] *= 10.0
-    df_mut.loc[as_of_idx + 1 :, "high"] *= 10.0
-    df_mut.loc[as_of_idx + 1 :, "low"] *= 0.1
-    df_mut.loc[as_of_idx + 1 :, "close"] *= 10.0
-    df_mut.loc[as_of_idx + 1 :, "volume"] *= 500
+    df_mut.loc[as_of_idx + 1 :, "open"] *= 5.0
+    df_mut.loc[as_of_idx + 1 :, "high"] *= 5.0
+    df_mut.loc[as_of_idx + 1 :, "low"] *= 0.2
+    df_mut.loc[as_of_idx + 1 :, "close"] *= 5.0
+    df_mut.loc[as_of_idx + 1 :, "volume"] *= 10.0
 
-    df_t_mut = PointInTimeFilter.filter_market_data(df_mut, as_of_dt)
-    PointInTimeFilter.enforce_pit_boundary(df_t_mut, as_of_dt)
-    features_mut = TechnicalIndicators.compute_all_indicators(df_t_mut)
+    pit_mut = PointInTimeFilter.filter_market_data(df_mut, as_of_dt)
+    PointInTimeFilter.enforce_pit_boundary(pit_mut, as_of_dt)
+    assert pd.to_datetime(pit_mut["timestamp"]).max().date() <= as_of_dt
+
+    features_mut = TechnicalIndicators.compute_all_indicators(pit_mut)
     patterns_mut = PatternRecognizer.evaluate_all_patterns(features_mut)
     levels_mut, _ = TradeConstructionEngine.construct_trade_levels(sym, features_mut)
 
-    signals_mut = [(p.pattern_type.value, p.quality_score) for p in patterns_mut if p.is_matched]
+    signals_mut = [(p.pattern_type.value, p.is_matched, p.quality_score) for p in patterns_mut]
 
+    # Assert exact pattern recognition and signal identity
     assert signals_orig == signals_mut
 
+    # Assert exact trade construction level identity (entry, stop, targets)
     if levels_orig is not None:
         assert levels_mut is not None
         assert levels_orig.entry_trigger_price == levels_mut.entry_trigger_price
@@ -380,24 +386,26 @@ def test_future_ohlcv_mutation_does_not_change_features_at_T():
     as_of_idx = 120
     as_of_dt = df_orig.iloc[as_of_idx]["timestamp"].date()
 
-    # Pass full un-truncated DataFrame through production PIT boundary
+    # Baseline features through production PIT boundary
     raw_sub_orig = PointInTimeFilter.filter_market_data(df_orig, as_of_dt)
     PointInTimeFilter.enforce_pit_boundary(raw_sub_orig, as_of_dt)
+    assert pd.to_datetime(raw_sub_orig["timestamp"]).max().date() <= as_of_dt
     base_features = TechnicalIndicators.compute_all_indicators(raw_sub_orig)
 
     feat_cols = ["sma_20", "ema_20", "ema_50", "rsi_14", "atr_14", "rvol_20"]
     base_values = {col: float(base_features[col].iloc[-1]) for col in feat_cols if col in base_features.columns}
 
-    # Mutate ONLY future rows (> T) in full DataFrame
+    # Extreme mutation ONLY for rows > T (open*5, high*5, low*0.2, close*5, volume*10)
     df_mut = df_orig.copy()
-    df_mut.loc[as_of_idx + 1 :, "open"] *= 50.0
-    df_mut.loc[as_of_idx + 1 :, "high"] *= 50.0
-    df_mut.loc[as_of_idx + 1 :, "low"] *= 0.05
-    df_mut.loc[as_of_idx + 1 :, "close"] *= 50.0
-    df_mut.loc[as_of_idx + 1 :, "volume"] *= 500
+    df_mut.loc[as_of_idx + 1 :, "open"] *= 5.0
+    df_mut.loc[as_of_idx + 1 :, "high"] *= 5.0
+    df_mut.loc[as_of_idx + 1 :, "low"] *= 0.2
+    df_mut.loc[as_of_idx + 1 :, "close"] *= 5.0
+    df_mut.loc[as_of_idx + 1 :, "volume"] *= 10.0
 
     raw_sub_mut = PointInTimeFilter.filter_market_data(df_mut, as_of_dt)
     PointInTimeFilter.enforce_pit_boundary(raw_sub_mut, as_of_dt)
+    assert pd.to_datetime(raw_sub_mut["timestamp"]).max().date() <= as_of_dt
     mut_features = TechnicalIndicators.compute_all_indicators(raw_sub_mut)
 
     mut_values = {col: float(mut_features[col].iloc[-1]) for col in feat_cols if col in mut_features.columns}
