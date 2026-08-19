@@ -13,7 +13,7 @@ from src.data.fundamental_provider import ScreenerFundamentalProvider
 from src.data.news_provider import FinancialNewsProvider
 from src.data.validation import DataValidator
 from src.data.universe import UniverseDiscoveryEngine
-from src.data.point_in_time import PointInTimeFilter, PITContract, PITRegressionHelper
+from src.data.point_in_time import PointInTimeFilter, PITContract, PITRegressionHelper, PITViolationError
 
 __all__ = [
     "MarketDataProvider",
@@ -30,4 +30,5 @@ __all__ = [
     "PointInTimeFilter",
     "PITContract",
     "PITRegressionHelper",
+    "PITViolationError",
 ]

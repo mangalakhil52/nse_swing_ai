@@ -16,6 +16,7 @@ import pandas as pd
 from src.agents.trade_construction_agent import TradeConstructionEngine
 from src.backtest.engine import BacktestTrade, BacktestResult, BacktestEngine
 from src.backtest.friction import IndianFrictionModel
+from src.data.point_in_time import PointInTimeFilter
 from src.quant.indicators import TechnicalIndicators
 from src.quant.patterns import PatternRecognizer
 
@@ -300,7 +301,9 @@ class PortfolioBacktestEngine:
                     if bar_idx < 50:
                         continue
 
-                    sub_df = df_sym.iloc[: bar_idx + 1]  # Point-in-time slice (t <= T)
+                    current_d = pd.to_datetime(current_ts).date()
+                    sub_df = PointInTimeFilter.filter_market_data(df_sym.iloc[: bar_idx + 1], current_d)
+                    PointInTimeFilter.enforce_pit_boundary(sub_df, current_d)
                     patterns = PatternRecognizer.evaluate_all_patterns(sub_df)
 
                     for p in patterns:

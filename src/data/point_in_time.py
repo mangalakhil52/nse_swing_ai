@@ -19,6 +19,11 @@ from src.core.models import CorporateAnnouncement, CorporateEvent, NewsArticle, 
 logger = logging.getLogger(__name__)
 
 
+class PITViolationError(ValueError):
+    """Raised when a data payload violates point-in-time boundaries (contains future rows)."""
+    pass
+
+
 @dataclass
 class PITContract:
     source_name: str
@@ -39,15 +44,39 @@ class PointInTimeFilter:
     """Central point-in-time enforcement engine filtering future information."""
 
     @classmethod
-    def filter_market_data(cls, df: pd.DataFrame, as_of_date: date) -> pd.DataFrame:
+    def filter_market_data(cls, df: pd.DataFrame, as_of_date: date | str | pd.Timestamp) -> pd.DataFrame:
         """Filters OHLCV dataframe so no bars beyond as_of_date are visible."""
         if df is None or df.empty or "timestamp" not in df.columns:
             return df
 
+        as_of_dt = pd.to_datetime(as_of_date).date()
         df_copy = df.copy()
         df_copy["_dt"] = pd.to_datetime(df_copy["timestamp"]).dt.date
-        df_pit = df_copy[df_copy["_dt"] <= as_of_date].drop(columns=["_dt"]).copy()
+        df_pit = df_copy[df_copy["_dt"] <= as_of_dt].drop(columns=["_dt"]).copy()
         return df_pit.sort_values("timestamp").reset_index(drop=True)
+
+    @classmethod
+    def enforce_pit_boundary(cls, df: pd.DataFrame, as_of_date: date | str | pd.Timestamp) -> pd.DataFrame:
+        """
+        Enforces the SignalGeneration PIT Contract:
+          input_data.max_timestamp <= decision_time
+        Fails closed (raises PITViolationError) if any future row > as_of_date is present.
+        """
+        if df is None or df.empty:
+            return df
+
+        as_of_dt = pd.to_datetime(as_of_date).date()
+        if "timestamp" in df.columns:
+            max_dt = pd.to_datetime(df["timestamp"]).max().date()
+        else:
+            max_dt = pd.to_datetime(df.index).max().date()
+
+        if max_dt > as_of_dt:
+            raise PITViolationError(
+                f"PIT Violation: Input DataFrame max_timestamp ({max_dt}) exceeds decision_time ({as_of_dt})."
+            )
+
+        return df
 
     @classmethod
     def filter_news(cls, articles: list[NewsArticle], as_of_date: date) -> list[NewsArticle]:
