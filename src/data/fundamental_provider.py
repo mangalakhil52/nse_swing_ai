@@ -100,6 +100,7 @@ class ScreenerFundamentalProvider(FundamentalProvider):
                 data = json.loads(cache_file.read_text(encoding="utf-8"))
                 ratios = data.get("annual_ratios", {})
                 if ratios:
+                    a_date = datetime.strptime(ratios["available_at"], "%Y-%m-%d").date() if ratios.get("available_at") else None
                     return AnnualRatios(
                         symbol=symbol,
                         fiscal_year=int(ratios.get("fiscal_year", 2026)),
@@ -110,11 +111,12 @@ class ScreenerFundamentalProvider(FundamentalProvider):
                         cfo_to_pat_ratio=float(ratios.get("cfo_to_pat_ratio", 0.95)),
                         working_capital_days=float(ratios.get("working_capital_days", 45.0)),
                         fundamental_grade=FundamentalGrade(ratios.get("fundamental_grade", "STRONG")),
+                        available_at=a_date,
                     )
             except Exception as e:
                 logger.warning(f"Error parsing annual ratios for {symbol}: {e}")
 
-        # Default healthy fallback
+        # Default healthy fallback (marked with available_at=None for fail-closed PIT isolation)
         return AnnualRatios(
             symbol=symbol,
             fiscal_year=2026,
@@ -125,6 +127,7 @@ class ScreenerFundamentalProvider(FundamentalProvider):
             cfo_to_pat_ratio=0.92,
             working_capital_days=42.0,
             fundamental_grade=FundamentalGrade.STRONG,
+            available_at=None,
         )
 
     async def get_shareholding_pattern(self, symbol: str) -> ShareholdingPattern | None:
@@ -139,6 +142,7 @@ class ScreenerFundamentalProvider(FundamentalProvider):
                 data = json.loads(cache_file.read_text(encoding="utf-8"))
                 shp = data.get("shareholding", {})
                 if shp:
+                    a_date = datetime.strptime(shp["available_at"], "%Y-%m-%d").date() if shp.get("available_at") else None
                     return ShareholdingPattern(
                         symbol=symbol,
                         quarter_date=datetime.strptime(shp.get("quarter_date", "2026-06-30"), "%Y-%m-%d").date(),
@@ -148,20 +152,22 @@ class ScreenerFundamentalProvider(FundamentalProvider):
                         dii_pct=float(shp.get("dii_pct", 12.0)),
                         public_pct=float(shp.get("public_pct", 8.0)),
                         promoter_change_quarterly_pct=float(shp.get("promoter_change_quarterly_pct", 0.0)),
+                        available_at=a_date,
                     )
             except Exception as e:
                 logger.warning(f"Error parsing shareholding pattern for {symbol}: {e}")
 
-        # Default clean shareholding fallback (0% pledging)
+        # Default clean shareholding fallback (marked with available_at=None for fail-closed PIT isolation)
         return ShareholdingPattern(
             symbol=symbol,
             quarter_date=date(2026, 6, 30),
             promoter_pct=55.4,
             promoter_pledged_pct=0.0,
             fii_pct=21.8,
-            dii_pct=14.2,
-            public_pct=8.6,
+            dii_pct=12.4,
+            public_pct=10.4,
             promoter_change_quarterly_pct=0.0,
+            available_at=None,
         )
 
     def cache_fundamental_record(

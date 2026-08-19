@@ -14,7 +14,14 @@ import logging
 from typing import Any, Callable
 import pandas as pd
 
-from src.core.models import CorporateAnnouncement, CorporateEvent, NewsArticle, QuarterlyFinancials
+from src.core.models import (
+    AnnualRatios,
+    CorporateAnnouncement,
+    CorporateEvent,
+    NewsArticle,
+    QuarterlyFinancials,
+    ShareholdingPattern,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +125,44 @@ class PointInTimeFilter:
             avail_d = avail if isinstance(avail, date) else pd.to_datetime(avail).date()
             if avail_d <= as_of_date:
                 valid.append(f)
+        return valid
+
+    @classmethod
+    def filter_annual_ratios(
+        cls, ratios: list[AnnualRatios], as_of_date: date
+    ) -> list[AnnualRatios]:
+        """
+        Filters annual ratio records based on explicit available_at timestamp.
+        Fails closed (excludes item) if available_at is missing.
+        """
+        valid = []
+        for r in ratios:
+            avail = getattr(r, "available_at", None)
+            if avail is None:
+                logger.warning(f"PIT_UNVERIFIED: AnnualRatios for {r.symbol} fiscal_year {r.fiscal_year} lacks available_at.")
+                continue
+            avail_d = avail if isinstance(avail, date) else pd.to_datetime(avail).date()
+            if avail_d <= as_of_date:
+                valid.append(r)
+        return valid
+
+    @classmethod
+    def filter_shareholding_patterns(
+        cls, patterns: list[ShareholdingPattern], as_of_date: date
+    ) -> list[ShareholdingPattern]:
+        """
+        Filters shareholding pattern records based on explicit available_at timestamp.
+        Fails closed (excludes item) if available_at is missing.
+        """
+        valid = []
+        for s in patterns:
+            avail = getattr(s, "available_at", None)
+            if avail is None:
+                logger.warning(f"PIT_UNVERIFIED: ShareholdingPattern for {s.symbol} quarter {s.quarter_date} lacks available_at.")
+                continue
+            avail_d = avail if isinstance(avail, date) else pd.to_datetime(avail).date()
+            if avail_d <= as_of_date:
+                valid.append(s)
         return valid
 
 
