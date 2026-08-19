@@ -144,11 +144,17 @@ class DataQualityGate:
         # 8. PIT safety check
         pit_safe = True
         if as_of_date is not None and "timestamp" in df.columns:
-            as_of_d = as_of_date.date() if isinstance(as_of_date, datetime) else as_of_date
-            max_ts = pd.to_datetime(df["timestamp"]).max().date()
-            if max_ts > as_of_d:
-                pit_safe = False
-                reasons.append("PIT_VIOLATION")
+            if isinstance(as_of_date, datetime):
+                max_ts = pd.to_datetime(df["timestamp"]).max()
+                if max_ts > as_of_date:
+                    pit_safe = False
+                    reasons.append("PIT_VIOLATION")
+            else:
+                as_of_dt = datetime.combine(as_of_date, datetime.max.time())
+                max_ts = pd.to_datetime(df["timestamp"]).max()
+                if max_ts > as_of_dt:
+                    pit_safe = False
+                    reasons.append("PIT_VIOLATION")
 
         # 9. Freshness
         freshness_score = 100.0
@@ -212,12 +218,13 @@ class DataQualityGate:
         for f in financials:
             avail = getattr(f, "available_at", None) or getattr(f, "filing_date", None)
             if avail is None or getattr(f, "pit_status", "") == "PIT_UNVERIFIED":
+                pit_safe = False
                 if "FUNDAMENTAL_PIT_UNVERIFIED" not in reasons:
                     reasons.append("FUNDAMENTAL_PIT_UNVERIFIED")
             elif as_of_date is not None:
-                as_of_d = as_of_date.date() if isinstance(as_of_date, datetime) else as_of_date
-                avail_d = avail if isinstance(avail, date) else pd.to_datetime(avail).date()
-                if avail_d > as_of_d:
+                as_of_dt = as_of_date if isinstance(as_of_date, datetime) else datetime.combine(as_of_date, datetime.max.time())
+                avail_dt = avail if isinstance(avail, datetime) else datetime.combine(avail, datetime.min.time())
+                if avail_dt > as_of_dt:
                     pit_safe = False
                     if "PIT_VIOLATION" not in reasons:
                         reasons.append("PIT_VIOLATION")
@@ -226,8 +233,9 @@ class DataQualityGate:
             status = DataQualityStatus.PIT_VIOLATION
             quality_score = 0.0
         elif "FUNDAMENTAL_PIT_UNVERIFIED" in reasons:
-            status = DataQualityStatus.DEGRADED
-            quality_score = 40.0
+            status = DataQualityStatus.PIT_VIOLATION
+            quality_score = 0.0
+            pit_safe = False
         else:
             status = DataQualityStatus.VALID
             quality_score = 100.0
@@ -236,7 +244,7 @@ class DataQualityGate:
             source_name="FUNDAMENTALS",
             status=status,
             quality_score=quality_score,
-            completeness_score=100.0 if status == DataQualityStatus.VALID else 50.0,
+            completeness_score=100.0 if status == DataQualityStatus.VALID else 0.0,
             freshness_score=100.0 if pit_safe else 0.0,
             pit_safe=pit_safe,
             reasons=reasons,
@@ -276,7 +284,8 @@ class DataQualityGate:
                             reasons.append("PIT_VIOLATION")
                 else:
                     pub_d = pub.date() if isinstance(pub, datetime) else pub
-                    if pub_d > as_of_date:
+                    as_of_d = as_of_date if isinstance(as_of_date, date) else as_of_date.date()
+                    if pub_d > as_of_d:
                         pit_safe = False
                         if "PIT_VIOLATION" not in reasons:
                             reasons.append("PIT_VIOLATION")
@@ -321,11 +330,17 @@ class DataQualityGate:
         pit_safe = True
         reasons: list[str] = []
         if as_of_date is not None and "timestamp" in nifty_df.columns:
-            as_of_d = as_of_date.date() if isinstance(as_of_date, datetime) else as_of_date
-            max_ts = pd.to_datetime(nifty_df["timestamp"]).max().date()
-            if max_ts > as_of_d:
-                pit_safe = False
-                reasons.append("PIT_VIOLATION")
+            if isinstance(as_of_date, datetime):
+                max_ts = pd.to_datetime(nifty_df["timestamp"]).max()
+                if max_ts > as_of_date:
+                    pit_safe = False
+                    reasons.append("PIT_VIOLATION")
+            else:
+                as_of_dt = datetime.combine(as_of_date, datetime.max.time())
+                max_ts = pd.to_datetime(nifty_df["timestamp"]).max()
+                if max_ts > as_of_dt:
+                    pit_safe = False
+                    reasons.append("PIT_VIOLATION")
 
         status = DataQualityStatus.PIT_VIOLATION if not pit_safe else DataQualityStatus.VALID
         return SourceQualityResult(
@@ -358,11 +373,17 @@ class DataQualityGate:
         pit_safe = True
         reasons: list[str] = []
         if as_of_date is not None and "timestamp" in benchmark_df.columns:
-            as_of_d = as_of_date.date() if isinstance(as_of_date, datetime) else as_of_date
-            max_ts = pd.to_datetime(benchmark_df["timestamp"]).max().date()
-            if max_ts > as_of_d:
-                pit_safe = False
-                reasons.append("PIT_VIOLATION")
+            if isinstance(as_of_date, datetime):
+                max_ts = pd.to_datetime(benchmark_df["timestamp"]).max()
+                if max_ts > as_of_date:
+                    pit_safe = False
+                    reasons.append("PIT_VIOLATION")
+            else:
+                as_of_dt = datetime.combine(as_of_date, datetime.max.time())
+                max_ts = pd.to_datetime(benchmark_df["timestamp"]).max()
+                if max_ts > as_of_dt:
+                    pit_safe = False
+                    reasons.append("PIT_VIOLATION")
 
         status = DataQualityStatus.PIT_VIOLATION if not pit_safe else DataQualityStatus.VALID
         return SourceQualityResult(
