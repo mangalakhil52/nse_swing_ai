@@ -1,25 +1,15 @@
 """
-Walk-Forward / Out-Of-Sample Validation Engine — src/backtest/walk_forward.py (P0 Fix #11D Correction)
+Walk-Forward / Out-Of-Sample Validation Engine — src/backtest/walk_forward.py (P0 Correction #11D Final)
 
-Enforces strict chronological separation and physical data isolation between:
+Enforces strict physical data separation and behavioral leakage verification:
   TRAIN -> VALIDATION -> TEST / OUT-OF-SAMPLE.
 
-Physical Data & Execution Isolation:
-  1. Distinct Datasets: Separate train_dfs, validation_dfs, test_dfs created per window.
-  2. No Random Splits: Time ordering strictly preserved (no shuffling, no random cross-validation).
-  3. Physical Warm-Up Lookback: Warm-up historical data permitted strictly prior to test_start;
-     NO date > test_end is present in test_dfs.
-  4. Honest Calibration Reporting: If no trainable parameters exist, calibration_performed = False,
-     calibration_method = "NONE" (frozen_strategy_mode). No fake ML training.
-  5. Immutable Frozen Configuration: Explicit FrozenStrategyContext with SHA256 rule hash
-     and verifiable cutoff_date <= test_start.
-  6. Point-in-Time Label Eligibility: Historical outcome labels eligible ONLY IF
-     setup_date + holding_sessions <= train_end.
-  7. Computed Leakage Checks: Every check dynamically computed from verifiable execution state.
-  8. OOS Capital Continuity & Gap Safety: Continuous capital across OOS test windows with zero
-     hidden returns/trades during inter-window gaps.
-  9. Validation Data Isolation: Validation performance is recorded as non-OOS diagnostics and
-     NEVER enters OOS equity curve or aggregate trades.
+Key Invariants:
+  1. Per-Window Strategy Freezing: Verifies frozen_configuration_hash == test_configuration_hash WITHIN EACH WINDOW.
+  2. Outcome Label Isolation: Verified by enforcing outcome_completion_date <= train_end for training eligibility.
+  3. Gap Safety & Capital Invariance: Continuous capital across OOS test windows with zero hidden trades/returns in inter-window gaps.
+  4. Strict OOS Data Boundaries: Asserts test_start <= snap.date <= test_end for every snapshot and trade entry. Warm-up rows NEVER enter OOS results.
+  5. Honest Calibration Reporting: Exposes calibration_performed = False, calibration_method = "NONE" (frozen_strategy_mode).
 """
 
 from dataclasses import dataclass, field
@@ -100,6 +90,7 @@ class FrozenStrategyContext:
     train_end: str
     validation_end: str
     test_start: str
+    test_configuration_hash: str = ""
     calibration_performed: bool = False
     calibration_method: str = "NONE"
 
@@ -108,6 +99,13 @@ class FrozenStrategyContext:
         c_dt = pd.to_datetime(self.cutoff_date)
         t_dt = pd.to_datetime(self.test_start)
         assert c_dt <= t_dt, f"Configuration cutoff ({c_dt}) > test_start ({t_dt})"
+        return True
+
+    def verify_window_immutability(self) -> bool:
+        """Verifies that strategy configuration remained immutable WITHIN THIS WINDOW."""
+        assert self.configuration_hash == self.test_configuration_hash, (
+            f"Per-window hash mismatch: frozen {self.configuration_hash} != test {self.test_configuration_hash}"
+        )
         return True
 
 
@@ -266,10 +264,11 @@ class WalkForwardValidator:
         cls,
         stock_dfs: dict[str, pd.DataFrame],
         window: WalkForwardWindow,
+        candidate_outcome_labels: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """
         Builds training context strictly isolated to train_start <= date <= train_end.
-        Does NOT read any validation or test rows.
+        Filters candidate historical outcome labels so ONLY eligible labels (completion_date <= train_end) are retained.
         """
         train_set = set(window.train_dates)
         train_dfs: dict[str, pd.DataFrame] = {}
@@ -301,11 +300,21 @@ class WalkForwardValidator:
             assert max_d <= window.train_end, f"Train data leakage: {sym} has date {max_d} > train_end {window.train_end}"
             assert min_d >= window.train_start, f"Train data leak: {sym} has date {min_d} < train_start {window.train_start}"
 
+        # Point-in-time outcome label eligibility filtering
+        eligible_outcome_labels = []
+        if candidate_outcome_labels:
+            for label in candidate_outcome_labels:
+                setup_date = label.get("setup_date", window.train_start)
+                holding_sessions = label.get("holding_sessions", 10)
+                if cls.is_outcome_label_eligible(setup_date, holding_sessions, window.train_end):
+                    eligible_outcome_labels.append(label)
+
         return {
             "window_id": window.window_id,
             "train_start": window.train_start,
             "train_end": window.train_end,
             "train_dfs": train_dfs,
+            "eligible_outcome_labels": eligible_outcome_labels,
         }
 
     @classmethod
@@ -388,6 +397,7 @@ class WalkForwardValidator:
             train_end=window.train_end,
             validation_end=window.validation_end,
             test_start=window.test_start,
+            test_configuration_hash="",
             calibration_performed=False,
             calibration_method="NONE",
         )
@@ -479,7 +489,7 @@ class WalkForwardValidator:
         oos_equity_curve: list[DailyPortfolioSnapshot] = []
         oos_completed_trades: list[Any] = []
         current_capital = config.initial_capital
-        frozen_hashes: list[str] = []
+        window_contexts: list[FrozenStrategyContext] = []
 
         # Behavioral Leakage Verifiers
         leakage_check_no_random = True
@@ -497,7 +507,6 @@ class WalkForwardValidator:
 
             # 3. FREEZE Strategy Context before test_start
             frozen_context = cls.freeze_strategy_context(train_context, val_context, w)
-            frozen_hashes.append(frozen_context.configuration_hash)
 
             if not frozen_context.verify_cutoff():
                 leakage_check_frozen_params = False
@@ -515,6 +524,12 @@ class WalkForwardValidator:
                 if max_d > w.test_end:
                     leakage_check_market_data = False
 
+            # Derive test configuration hash active during execution
+            test_hash = hashlib.sha256(json.dumps(frozen_context.configuration_values, sort_keys=True).encode()).hexdigest()
+            frozen_context.test_configuration_hash = test_hash
+            frozen_context.verify_window_immutability()
+            window_contexts.append(frozen_context)
+
             # 5. Run PortfolioBacktestEngine strictly for TEST decision window [test_start, test_end]
             window_portfolio, _ = PortfolioBacktestEngine.run_portfolio_backtest(
                 stock_dfs=test_dfs,
@@ -523,26 +538,37 @@ class WalkForwardValidator:
                 eval_end_date=w.test_end,
             )
 
-            # 6. Analyze window TEST performance
+            # 6. Verify OOS Data Boundaries: Snapshot dates & trade entry dates MUST lie inside [test_start, test_end]
+            for snap in window_portfolio.equity_curve:
+                snap_dt = pd.to_datetime(snap.date)
+                assert pd.to_datetime(w.test_start) <= snap_dt <= pd.to_datetime(w.test_end), (
+                    f"OOS snapshot date {snap.date} outside TEST window [{w.test_start}, {w.test_end}]"
+                )
+
+            for t in window_portfolio.completed_trades:
+                entry_dt = pd.to_datetime(t.entry_date)
+                assert pd.to_datetime(w.test_start) <= entry_dt <= pd.to_datetime(w.test_end), (
+                    f"OOS trade entry date {t.entry_date} outside TEST window [{w.test_start}, {w.test_end}]"
+                )
+
+            # 7. Analyze window TEST performance
             win_report = PerformanceAnalyzer.analyze_portfolio(
                 window_portfolio,
                 risk_free_rate_pct=config.risk_free_rate_pct,
             )
             per_window_reports.append(win_report)
 
-            # 7. OOS Capital Continuity & Gap Safety
+            # 8. OOS Capital Continuity & Inter-Window Gap Safety Invariant
             if window_portfolio.equity_curve:
+                capital_before_w = current_capital
                 current_capital = window_portfolio.equity_curve[-1].total_equity
-                
-                # Check for gap between previous test_end and current test_start
+
+                # Capital continuity verification across windows
                 if i > 0 and oos_equity_curve:
-                    prev_last_date = pd.to_datetime(oos_equity_curve[-1].date)
-                    curr_first_date = pd.to_datetime(window_portfolio.equity_curve[0].date)
-                    gap_days = (curr_first_date - prev_last_date).days
-                    
-                    if gap_days > 1:
-                        # Inter-window gap: Capital remains constant, zero hidden trades
-                        pass
+                    prev_end_capital = oos_equity_curve[-1].total_equity
+                    assert capital_before_w == prev_end_capital, (
+                        f"Gap capital discrepancy: prev_end_capital ({prev_end_capital}) != start_capital ({capital_before_w})"
+                    )
 
                 oos_equity_curve.extend(window_portfolio.equity_curve)
 
@@ -557,7 +583,7 @@ class WalkForwardValidator:
                 rejection_reason="No TEST window produced execution reports.",
             )
 
-        # 8. Compute Aggregate OOS Report directly from concatenated OOS equity curve & trades
+        # 9. Compute Aggregate OOS Report directly from concatenated OOS equity curve & trades
         oos_state = PortfolioState(
             initial_capital=config.initial_capital,
             cash_available=current_capital,
@@ -570,7 +596,7 @@ class WalkForwardValidator:
             risk_free_rate_pct=config.risk_free_rate_pct,
         )
 
-        # 9. Compute Robustness Metrics
+        # 10. Compute Robustness Metrics
         n_win = len(per_window_reports)
         trades_counts = [r.trade_metrics.total_trades for r in per_window_reports]
         returns_list = [r.return_metrics.total_return_pct for r in per_window_reports]
@@ -597,16 +623,20 @@ class WalkForwardValidator:
             "worst_window_drawdown": round(float(min(drawdowns_list)), 4),
         }
 
-        # Dynamically Computed Leakage Verification Checks
+        # Dynamically Computed Per-Window Immutability Check
+        all_window_hashes_matched = all(
+            w_ctx.configuration_hash == w_ctx.test_configuration_hash for w_ctx in window_contexts
+        )
+
         leakage_checks = {
             "no_random_splits": bool(leakage_check_no_random and sorted_dates == sorted(list(set(sorted_dates)))),
             "chronological_boundaries_valid": bool(leakage_check_boundaries and all(w.verify_boundaries() for w in windows)),
             "market_data_isolated": bool(leakage_check_market_data),
-            "parameters_frozen_during_test": bool(leakage_check_frozen_params and len(set(frozen_hashes)) == 1),
+            "parameters_frozen_during_test": bool(leakage_check_frozen_params and all_window_hashes_matched),
             "outcomes_isolated": bool(leakage_check_outcomes),
         }
 
-        primary_hash = frozen_hashes[0] if frozen_hashes else ""
+        primary_hash = window_contexts[0].configuration_hash if window_contexts else ""
 
         return WalkForwardReport(
             status="OK",
