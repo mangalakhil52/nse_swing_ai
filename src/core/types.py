@@ -65,6 +65,7 @@ class SignalType(str, Enum):
     BEARISH = "BEARISH"
     NEUTRAL = "NEUTRAL"
     REJECT = "REJECT"
+    UNKNOWN = "UNKNOWN"
 
 
 class SourceTier(int, Enum):
