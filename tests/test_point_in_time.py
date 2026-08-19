@@ -356,8 +356,39 @@ def test_future_ohlcv_mutation_does_not_change_trade_levels():
         assert levels_orig.target_3 == levels_mut.target_3
 
 
+def test_future_ohlcv_mutation_does_not_change_features_at_T():
+    """16. Test feature generation at T is 100% identical when future OHLCV (> T) is mutated."""
+    sym, df_orig = _generate_synthetic_stock_df(180)
+    as_of_idx = 120
+    as_of_dt = df_orig.iloc[as_of_idx]["timestamp"].date()
+
+    # Baseline features computed on PIT-safe sliced data
+    raw_sub_orig = PointInTimeFilter.filter_market_data(df_orig.iloc[: as_of_idx + 1], as_of_dt)
+    PointInTimeFilter.enforce_pit_boundary(raw_sub_orig, as_of_dt)
+    base_features = TechnicalIndicators.compute_all_indicators(raw_sub_orig)
+
+    feat_cols = ["sma_20", "ema_20", "ema_50", "rsi_14", "atr_14", "rvol_20"]
+    base_values = {col: float(base_features[col].iloc[-1]) for col in feat_cols if col in base_features.columns}
+
+    # Mutate ONLY future rows (> T)
+    df_mut = df_orig.copy()
+    df_mut.loc[as_of_idx + 1 :, "close"] *= 50.0
+    df_mut.loc[as_of_idx + 1 :, "high"] *= 50.0
+    df_mut.loc[as_of_idx + 1 :, "low"] *= 50.0
+    df_mut.loc[as_of_idx + 1 :, "volume"] *= 500
+
+    raw_sub_mut = PointInTimeFilter.filter_market_data(df_mut.iloc[: as_of_idx + 1], as_of_dt)
+    PointInTimeFilter.enforce_pit_boundary(raw_sub_mut, as_of_dt)
+    mut_features = TechnicalIndicators.compute_all_indicators(raw_sub_mut)
+
+    mut_values = {col: float(mut_features[col].iloc[-1]) for col in feat_cols if col in mut_features.columns}
+
+    # Assert every feature at T is 100% identical
+    assert base_values == mut_values
+
+
 def test_pit_contract_fails_closed_on_future_row():
-    """16. Test PIT contract fails closed by raising PITViolationError if a future row > as_of_date is passed."""
+    """17. Test PIT contract fails closed by raising PITViolationError if a future row > as_of_date is passed."""
     from src.data.point_in_time import PITViolationError
 
     sym, df = _generate_synthetic_stock_df(150)

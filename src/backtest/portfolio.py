@@ -157,19 +157,18 @@ class PortfolioBacktestEngine:
             stats = BacktestEngine._compute_stats([])
             return portfolio, stats
 
-        # Precompute indicators & map timestamps
-        enriched_dfs: dict[str, pd.DataFrame] = {}
+        # Map timestamps across raw stock DataFrames
+        raw_stock_dfs: dict[str, pd.DataFrame] = {}
         all_timestamps_set = set()
 
         for sym, df in stock_dfs.items():
             if df is None or len(df) < 50:
                 continue
-            e_df = TechnicalIndicators.compute_all_indicators(df.copy())
-            enriched_dfs[sym] = e_df
-            if "timestamp" in e_df.columns:
-                all_timestamps_set.update(pd.to_datetime(e_df["timestamp"]))
+            raw_stock_dfs[sym] = df
+            if "timestamp" in df.columns:
+                all_timestamps_set.update(pd.to_datetime(df["timestamp"]))
             else:
-                all_timestamps_set.update(e_df.index)
+                all_timestamps_set.update(df.index)
 
         sorted_timestamps = sorted(list(all_timestamps_set))
         eval_start_ts = pd.to_datetime(eval_start_date) if eval_start_date else None
@@ -183,9 +182,8 @@ class PortfolioBacktestEngine:
             # STEP 1: Process Exits for Open Positions
             # -------------------------------------------------------------
             symbols_to_close: list[str] = []
-
             for sym, pos in list(portfolio.open_positions.items()):
-                df_sym = enriched_dfs.get(sym)
+                df_sym = raw_stock_dfs.get(sym)
                 if df_sym is None:
                     continue
 
@@ -216,9 +214,7 @@ class PortfolioBacktestEngine:
                     exit_reason = "STOP_LOSS_GAP" if open_p < pos.stop_loss else "STOP_LOSS_HIT"
                     cls._close_position(portfolio, pos, exit_price, exit_reason, date_str)
                     symbols_to_close.append(sym)
-                    continue
-
-                # 2. Gap down below stop loss
+                    continue                # 2. Gap down below stop loss
                 if open_p < pos.stop_loss:
                     cls._close_position(portfolio, pos, open_p, "STOP_LOSS_GAP", date_str)
                     symbols_to_close.append(sym)
@@ -286,7 +282,7 @@ class PortfolioBacktestEngine:
                 is_eval_date = False
 
             if is_eval_date:
-                for sym, df_sym in enriched_dfs.items():
+                for sym, df_sym in raw_stock_dfs.items():
                     if "timestamp" in df_sym.columns:
                         mask = pd.to_datetime(df_sym["timestamp"]) == current_ts
                     else:
@@ -302,13 +298,13 @@ class PortfolioBacktestEngine:
                         continue
 
                     current_d = pd.to_datetime(current_ts).date()
-                    sub_df = PointInTimeFilter.filter_market_data(df_sym.iloc[: bar_idx + 1], current_d)
-                    PointInTimeFilter.enforce_pit_boundary(sub_df, current_d)
+                    raw_sub = PointInTimeFilter.filter_market_data(df_sym.iloc[: bar_idx + 1], current_d)
+                    PointInTimeFilter.enforce_pit_boundary(raw_sub, current_d)
+                    sub_df = TechnicalIndicators.compute_all_indicators(raw_sub)
                     patterns = PatternRecognizer.evaluate_all_patterns(sub_df)
 
                     for p in patterns:
                         if p.is_matched and p.quality_score >= 75.0:
-                            # 1. Position Identity Check: Default 1 position per symbol
                             if sym in portfolio.open_positions:
                                 portfolio.rejection_reasons.append(
                                     f"POSITION_ALREADY_OPEN: Position already active for {sym} on {date_str}."
@@ -418,7 +414,7 @@ class PortfolioBacktestEngine:
             market_val_sum = 0.0
 
             for sym, pos in portfolio.open_positions.items():
-                df_sym = enriched_dfs.get(sym)
+                df_sym = raw_stock_dfs.get(sym)
                 if df_sym is not None:
                     if "timestamp" in df_sym.columns:
                         mask = pd.to_datetime(df_sym["timestamp"]) <= current_ts
