@@ -86,10 +86,28 @@ class PointInTimeFilter:
         return df
 
     @classmethod
-    def filter_news(cls, articles: list[NewsArticle], as_of_date: date) -> list[NewsArticle]:
-        """Filters news articles to only those published/available on or before as_of_date."""
-        as_of_dt = datetime.combine(as_of_date, datetime.max.time())
-        return [a for a in articles if a.published_at <= as_of_dt]
+    def filter_news(cls, articles: list[NewsArticle], as_of_date: date | datetime) -> list[NewsArticle]:
+        """
+        Filters news articles to only those published/available on or before as_of_date/datetime.
+        Supports intraday timestamp precision when as_of_date is a datetime object.
+        Fails closed (excludes item) if published_at / available_at is missing.
+        """
+        valid = []
+        for a in articles:
+            pub = getattr(a, "available_at", None) or getattr(a, "published_at", None)
+            if pub is None:
+                logger.warning(f"PIT_UNVERIFIED: NewsArticle for {a.symbol} lacks published_at/available_at.")
+                continue
+            if isinstance(as_of_date, datetime):
+                pub_dt = pub if isinstance(pub, datetime) else datetime.combine(pub, datetime.min.time())
+                if pub_dt <= as_of_date:
+                    valid.append(a)
+            else:
+                as_of_dt = datetime.combine(as_of_date, datetime.max.time())
+                pub_dt = pub if isinstance(pub, datetime) else datetime.combine(pub, datetime.min.time())
+                if pub_dt <= as_of_dt:
+                    valid.append(a)
+        return valid
 
     @classmethod
     def filter_events(cls, events: list[CorporateEvent], as_of_date: date) -> list[CorporateEvent]:

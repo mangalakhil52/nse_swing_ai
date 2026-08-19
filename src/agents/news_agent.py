@@ -32,9 +32,17 @@ class NewsIntelligenceAgent(BaseAgent):
         run_id: str,
         context: dict[str, Any],
     ) -> AgentOutput:
+        from src.data.point_in_time import PointInTimeFilter
+
         symbol = symbol_meta.symbol
-        articles: list[NewsArticle] = context.get("news_articles", [])
+        raw_articles: list[NewsArticle] = context.get("news_articles", [])
         announcements: list[CorporateAnnouncement] = context.get("announcements", [])
+
+        as_of = context.get("as_of_datetime") or context.get("as_of_date")
+        if as_of and raw_articles:
+            articles = PointInTimeFilter.filter_news(raw_articles, as_of)
+        else:
+            articles = raw_articles
 
         if not articles and not announcements:
             return AgentOutput(
