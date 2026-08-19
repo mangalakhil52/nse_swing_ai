@@ -12,6 +12,8 @@ from typing import Any
 
 from config.settings import settings
 
+from src.core.models import SymbolMetadata
+
 logger = logging.getLogger(__name__)
 
 
@@ -19,11 +21,37 @@ class HistoricalUniverseProvider:
     """Provides historical universe snapshots representation of securities eligible at simulation_date."""
 
     @classmethod
-    def get_universe_for_date(cls, as_of_date: date) -> list[str]:
+    def filter_universe_by_date(
+        cls, securities: list[SymbolMetadata], as_of_date: date
+    ) -> list[SymbolMetadata]:
         """
-        Returns list of symbols eligible as of as_of_date.
+        Filters SymbolMetadata objects by listing_date and delisting_date as of as_of_date.
+        - Excludes security if listing_date > as_of_date (future IPO / not yet listed).
+        - Excludes security if delisting_date is set and delisting_date <= as_of_date (already delisted).
+        """
+        eligible = []
+        for sec in securities:
+            if sec.listing_date and sec.listing_date > as_of_date:
+                logger.debug(f"Excluding {sec.symbol}: listed on {sec.listing_date} > as_of_date {as_of_date}")
+                continue
+            if sec.delisting_date and sec.delisting_date <= as_of_date:
+                logger.debug(f"Excluding {sec.symbol}: delisted on {sec.delisting_date} <= as_of_date {as_of_date}")
+                continue
+            eligible.append(sec)
+        return eligible
+
+    @classmethod
+    def get_universe_for_date(
+        cls, as_of_date: date, securities: list[SymbolMetadata] | None = None
+    ) -> list[str]:
+        """
+        Returns list of symbol strings eligible as of as_of_date.
         Excludes stocks listed after as_of_date or delisted prior to as_of_date.
         """
+        if securities:
+            filtered_metadata = cls.filter_universe_by_date(securities, as_of_date)
+            return [s.symbol for s in filtered_metadata]
+
         # Historical NSE 500 / Liquid Universe base symbols
         base_symbols = list(settings.FOCUS_WATCHLIST) if hasattr(settings, "FOCUS_WATCHLIST") and settings.FOCUS_WATCHLIST else [
             "RELIANCE", "TCS", "INFY", "HDFCBANK", "ICICIBANK", "BHARTIARTL", "SBIN",

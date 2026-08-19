@@ -47,6 +47,8 @@ class SymbolMetadata(BaseDataModel):
     is_active: bool = Field(default=True, description="Whether active for equity trading")
     asm_gsm_stage: int = Field(default=0, description="SEBI Surveillance Stage: 0=None, 1-4=ASM/GSM")
     lot_size: int = Field(default=1, description="F&O lot size if applicable, else 1")
+    listing_date: date | None = Field(default=None, description="IPO / Listing Date on NSE")
+    delisting_date: date | None = Field(default=None, description="Delisting / Suspension Date on NSE")
 
 
 # ---------------------------------------------------------------------------
