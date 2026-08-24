@@ -9,7 +9,11 @@ on:
       - 'tests/**'
       - 'config/**'
       - 'requirements.txt'
+      - 'pyproject.toml'
       - '.github/workflows/system-verification.yml'
+
+env:
+  PYTHONPATH: ${{ github.workspace }}
 
 jobs:
   verify:
@@ -26,10 +30,22 @@ jobs:
           python-version: '3.11'
           cache: pip
 
-      - name: Install dependencies
+      - name: Install project and dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install -e .
+
+      - name: Verify Python import path
+        run: |
+          python - <<'PY'
+          import sys
+          import src
+          import config
+          print('Repository root:', sys.path[0])
+          print('src import:', src.__file__ if getattr(src, '__file__', None) else 'namespace package')
+          print('config import:', config.__file__ if getattr(config, '__file__', None) else 'namespace package')
+          PY
 
       - name: Run full test suite
         run: pytest -q
