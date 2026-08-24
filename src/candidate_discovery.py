@@ -66,9 +66,6 @@ class CandidateDiscoveryEngine:
             if normalized not in {"HISTORICAL", "LIVE"}:
                 raise ValueError("mode must be 'HISTORICAL' or 'LIVE'")
             return normalized
-        # Preserve the existing API while making the historical contract explicit:
-        # metadata implies historical eligibility can be enforced; plain symbols are
-        # treated as an already-resolved live/current universe.
         return "HISTORICAL" if universe and isinstance(universe[0], SymbolMetadata) else "LIVE"
 
     @classmethod
@@ -80,7 +77,6 @@ class CandidateDiscoveryEngine:
     ) -> list[str]:
         if universe is None:
             if mode == "HISTORICAL":
-                # Explicitly fail closed; never substitute the current watchlist.
                 HistoricalUniverseProvider.get_universe_for_date(
                     as_of_date.date() if isinstance(as_of_date, datetime) else as_of_date
                 )
@@ -152,7 +148,6 @@ class CandidateDiscoveryEngine:
                 results.append(cls._empty_result(symbol, as_of_date, "NO_DATA_AVAILABLE", pit_safe=False))
                 continue
 
-            # Central PIT slicing is the only market-data boundary used by this stage.
             sliced_df = PointInTimeFilter.filter_market_data(raw_df, as_of_date)
             if sliced_df is None or sliced_df.empty:
                 results.append(
@@ -160,51 +155,74 @@ class CandidateDiscoveryEngine:
                 )
                 continue
 
-            dq_result = DataQualityGate.evaluate_evidence_quality(
-                symbol=symbol,
-                df=sliced_df,
+            # Candidate Discovery only needs OHLCV quality. Optional sources such as
+            # benchmark, regime, news and fundamentals belong to downstream agents and
+            # must not make a stock ineligible at this inexpensive screening stage.
+            dq_source = DataQualityGate.evaluate_ohlcv(
+                sliced_df,
+                symbol,
                 as_of_date=as_of_date,
                 min_required_bars=cfg.min_history_length,
             )
 
-            passed: list[str] = ["DATA_AVAILABILITY"]
-            failed: list[str] = []
-            reasons: list[str] = []
-            filter_results: dict[str, bool] = {"DATA_AVAILABILITY": True}
-
-            if not dq_result.pit_safe or dq_result.overall_status == DataQualityStatus.PIT_VIOLATION:
-                failed.append("DATA_QUALITY")
-                filter_results["DATA_QUALITY"] = False
-                reasons.append("PIT_VIOLATION")
-                return_result = cls._empty_result(symbol, as_of_date, "PIT_VIOLATION", dq_result, False)
-                return_result.passed_filters = passed
-                return_result.failed_filters = ["DATA_QUALITY"]
-                return_result.filter_results = {"DATA_AVAILABILITY": True, "DATA_QUALITY": False}
-                return_result.reasons = ["PIT_VIOLATION"]
-                results.append(return_result)
+            if dq_source.pit_safe is False or dq_source.status == DataQualityStatus.PIT_VIOLATION:
+                dq_result = DataQualityResult(
+                    symbol=symbol,
+                    as_of_date=as_of_date,
+                    overall_status=DataQualityStatus.PIT_VIOLATION,
+                    overall_quality_score=0.0,
+                    pit_safe=False,
+                    is_trade_eligible=False,
+                    sources={"OHLCV": dq_source},
+                    blocking_reasons=["PIT_VIOLATION"],
+                    warnings=list(dq_source.warnings),
+                )
+                results.append(cls._empty_result(symbol, as_of_date, "PIT_VIOLATION", dq_result, False))
                 continue
 
-            if dq_result.overall_status == DataQualityStatus.INVALID:
-                failed.append("DATA_QUALITY")
-                filter_results["DATA_QUALITY"] = False
-                reasons.extend(dq_result.blocking_reasons or ["DATA_QUALITY_INVALID"])
+            if dq_source.status == DataQualityStatus.INVALID:
+                dq_result = DataQualityResult(
+                    symbol=symbol,
+                    as_of_date=as_of_date,
+                    overall_status=DataQualityStatus.INVALID,
+                    overall_quality_score=0.0,
+                    pit_safe=dq_source.pit_safe,
+                    is_trade_eligible=False,
+                    sources={"OHLCV": dq_source},
+                    blocking_reasons=list(dq_source.reasons),
+                    warnings=list(dq_source.warnings),
+                )
                 results.append(
                     CandidateDiscoveryResult(
                         symbol=symbol,
                         decision_time=as_of_date,
                         eligible=False,
-                        passed_filters=passed,
-                        failed_filters=failed,
-                        filter_results=filter_results,
-                        reasons=reasons,
+                        passed_filters=["DATA_AVAILABILITY"],
+                        failed_filters=["DATA_QUALITY"],
+                        filter_results={"DATA_AVAILABILITY": True, "DATA_QUALITY": False},
+                        reasons=list(dq_source.reasons) or ["DATA_QUALITY_INVALID"],
                         data_quality=dq_result,
-                        pit_safe=dq_result.pit_safe,
+                        pit_safe=dq_source.pit_safe,
                     )
                 )
                 continue
 
-            passed.append("DATA_QUALITY")
-            filter_results["DATA_QUALITY"] = True
+            dq_result = DataQualityResult(
+                symbol=symbol,
+                as_of_date=as_of_date,
+                overall_status=dq_source.status,
+                overall_quality_score=dq_source.quality_score,
+                pit_safe=dq_source.pit_safe,
+                is_trade_eligible=dq_source.pit_safe,
+                sources={"OHLCV": dq_source},
+                blocking_reasons=[],
+                warnings=list(dq_source.warnings),
+            )
+
+            passed: list[str] = ["DATA_AVAILABILITY", "DATA_QUALITY"]
+            failed: list[str] = []
+            reasons: list[str] = []
+            filter_results: dict[str, bool] = {"DATA_AVAILABILITY": True, "DATA_QUALITY": True}
 
             history_ok = len(sliced_df) >= cfg.min_history_length
             filter_results["HISTORY_SUFFICIENCY"] = history_ok
