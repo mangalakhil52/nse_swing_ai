@@ -47,9 +47,6 @@ jobs:
           print('config import:', config.__file__ if getattr(config, '__file__', None) else 'namespace package')
           PY
 
-      - name: Run full test suite
-        run: pytest -q
-
       - name: Verify broad NSE equity universe
         run: |
           python - <<'PY'
@@ -66,16 +63,12 @@ jobs:
               print(f'NSE equity universe size: {len(universe)}')
               print('Sample symbols:', [x.symbol for x in universe[:20]])
 
-              assert len(universe) > 1000, (
-                  f'Universe unexpectedly small: {len(universe)}'
-              )
-
+              assert len(universe) > 1000, f'Universe unexpectedly small: {len(universe)}'
               symbols = {x.symbol for x in universe}
               assert len(symbols) == len(universe), 'Duplicate symbols found'
               assert all(x.exchange == 'NSE' for x in universe)
               assert all(x.is_active for x in universe)
-
-              print('PASS: broad NSE equity universe loaded')
+              print('PASS: broad NSE equity universe loaded and cached')
 
           asyncio.run(main())
           PY
@@ -86,15 +79,11 @@ jobs:
           from src.data.historical_universe import HistoricalUniverseProvider
 
           symbols = HistoricalUniverseProvider.get_current_universe()
-
           print(f'Current universe size: {len(symbols)}')
           print('Sample symbols:', symbols[:20])
 
-          assert len(symbols) > 1000, (
-              f'Current universe unexpectedly small: {len(symbols)}'
-          )
+          assert len(symbols) > 1000, f'Current universe unexpectedly small: {len(symbols)}'
           assert len(symbols) == len(set(symbols)), 'Duplicate symbols found'
-
           print('PASS: current universe is broad')
           PY
 
@@ -112,11 +101,11 @@ jobs:
           except HistoricalUniverseUnavailableError:
               print('PASS: historical universe fails closed without metadata')
           else:
-              raise AssertionError(
-                  'Historical universe silently returned data without historical metadata'
-              )
+              raise AssertionError('Historical universe silently returned data without historical metadata')
           PY
 
+      - name: Run full test suite
+        run: pytest -q
+
       - name: Verify candidate discovery and technical agent tests
-        run: |
-          pytest -q tests/test_candidate_discovery.py tests/test_technical_agent.py
+        run: pytest -q tests/test_candidate_discovery.py tests/test_technical_agent.py
