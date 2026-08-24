@@ -1,8 +1,4 @@
-"""#14L live/historical Indian equity universe normalization.
-
-The universe provider is intentionally source-agnostic: adapters can supply NSE
-(or another approved source) symbols without hardcoding securities in analysis.
-"""
+"""#14L live/historical Indian equity universe normalization."""
 from dataclasses import dataclass
 from datetime import date
 
@@ -22,20 +18,29 @@ class MarketUniverseService:
         as_of_date = as_of_date or date.today()
         result = []
         seen = set()
-        for item in raw_symbols or []:
-            if isinstance(item, str):
-                symbol = item.strip().upper()
-                item = UniverseSymbol(symbol=symbol)
-            elif isinstance(item, UniverseSymbol):
-                symbol = item.symbol.strip().upper()
-                item = UniverseSymbol(symbol=symbol, exchange=item.exchange,
-                                      listing_date=item.listing_date, delisting_date=item.delisting_date,
-                                      active=item.active)
+        for raw_item in raw_symbols or []:
+            if raw_item is None:
+                continue
+            if isinstance(raw_item, str):
+                item = UniverseSymbol(symbol=raw_item.strip().upper())
+            elif isinstance(raw_item, UniverseSymbol):
+                item = UniverseSymbol(
+                    symbol=raw_item.symbol.strip().upper(), exchange=raw_item.exchange,
+                    listing_date=raw_item.listing_date, delisting_date=raw_item.delisting_date,
+                    active=raw_item.active,
+                )
+            elif isinstance(raw_item, dict):
+                item = UniverseSymbol(
+                    symbol=str(raw_item.get("symbol", "")).strip().upper(),
+                    exchange=str(raw_item.get("exchange", "NSE")),
+                    listing_date=raw_item.get("listing_date"),
+                    delisting_date=raw_item.get("delisting_date"),
+                    active=bool(raw_item.get("active", True)),
+                )
             else:
-                symbol = str(item.get("symbol", "")).strip().upper()
-                item = UniverseSymbol(symbol=symbol, exchange=item.get("exchange", "NSE"),
-                                      listing_date=item.get("listing_date"), delisting_date=item.get("delisting_date"),
-                                      active=item.get("active", True))
+                continue
+
+            symbol = item.symbol
             if not symbol or symbol in seen or item.exchange.upper() != "NSE":
                 continue
             if item.listing_date and item.listing_date > as_of_date:
