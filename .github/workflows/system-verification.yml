@@ -1,0 +1,112 @@
+name: System Verification
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'config/**'
+      - 'requirements.txt'
+      - '.github/workflows/system-verification.yml'
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run full test suite
+        run: pytest -q
+
+      - name: Verify broad NSE equity universe
+        run: |
+          python - <<'PY'
+          import asyncio
+          from src.data.nse_provider import NseDataProvider
+
+          async def main():
+              provider = NseDataProvider()
+              try:
+                  universe = await provider.fetch_active_securities()
+              finally:
+                  await provider.close()
+
+              print(f'NSE equity universe size: {len(universe)}')
+              print('Sample symbols:', [x.symbol for x in universe[:20]])
+
+              assert len(universe) > 1000, (
+                  f'Universe unexpectedly small: {len(universe)}'
+              )
+
+              symbols = {x.symbol for x in universe}
+              assert len(symbols) == len(universe), 'Duplicate symbols found'
+
+              # The broad NSE equity universe must not be restricted to F&O.
+              # Current provider metadata deliberately does not claim F&O
+              # eligibility from EQUITY_L.csv, so this is an API-contract check:
+              # every returned security must be an active NSE equity security.
+              assert all(x.exchange == 'NSE' for x in universe)
+              assert all(x.is_active for x in universe)
+
+              print('PASS: broad NSE equity universe loaded')
+
+          asyncio.run(main())
+          PY
+
+      - name: Verify current universe is broad and not hardcoded
+        run: |
+          python - <<'PY'
+          from src.data.historical_universe import HistoricalUniverseProvider
+
+          universe = HistoricalUniverseProvider.get_current_universe()
+          symbols = [x.symbol for x in universe]
+
+          print(f'Current universe size: {len(universe)}')
+          print('Sample symbols:', symbols[:20])
+
+          assert len(universe) > 1000, (
+              f'Current universe unexpectedly small: {len(universe)}'
+          )
+          assert len(symbols) == len(set(symbols)), 'Duplicate symbols found'
+
+          print('PASS: current universe is broad')
+          PY
+
+      - name: Verify historical universe fails closed without metadata
+        run: |
+          python - <<'PY'
+          from datetime import date
+          from src.data.historical_universe import (
+              HistoricalUniverseProvider,
+              HistoricalUniverseUnavailableError,
+          )
+
+          try:
+              HistoricalUniverseProvider.get_universe_for_date(date(2025, 1, 2))
+          except HistoricalUniverseUnavailableError:
+              print('PASS: historical universe fails closed without metadata')
+          else:
+              raise AssertionError(
+                  'Historical universe silently returned data without historical metadata'
+              )
+          PY
+
+      - name: Verify candidate discovery tests explicitly
+        run: |
+          pytest -q tests/test_candidate_discovery.py tests/test_technical_agent.py
