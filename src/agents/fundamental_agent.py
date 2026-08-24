@@ -81,14 +81,18 @@ class FundamentalAnalysisAgent(BaseAgent):
         score = min(100.0, max(0.0, score)) if metrics_evaluated else 0.0
         signal = SignalType.BULLISH if score >= 70.0 and metrics_evaluated >= 2 else (SignalType.BEARISH if score < 45.0 and metrics_evaluated >= 2 else SignalType.NEUTRAL)
 
-        if pat_growth is not None:
+        # EvidenceGraph requires a real timestamp. Do not fabricate one when
+        # the source fixture does not provide publication/availability metadata.
+        q_timestamp = getattr(latest_q, "available_at", None) or getattr(latest_q, "filing_date", None) if latest_q else None
+        if pat_growth is not None and q_timestamp is not None:
             evidence_graph.add_evidence(symbol=symbol, agent_name=self.agent_name, claim_type="EARNINGS_GROWTH",
                 raw_metric="pat_growth_yoy_pct", observed_value=f"YoY PAT Growth: {pat_growth:.1f}%", unit="pct",
-                source="QUARTERLY_FINANCIALS", timestamp=getattr(latest_q, "available_at", None) or getattr(latest_q, "filing_date", None))
-        if roe is not None:
+                source="QUARTERLY_FINANCIALS", timestamp=q_timestamp)
+        ratio_timestamp = getattr(ratios, "available_at", None) if ratios else None
+        if roe is not None and ratio_timestamp is not None:
             evidence_graph.add_evidence(symbol=symbol, agent_name=self.agent_name, claim_type="RETURN_RATIOS",
                 raw_metric="roe_pct", observed_value=f"ROE: {roe:.1f}%", unit="pct", source="ANNUAL_RATIOS",
-                timestamp=getattr(ratios, "available_at", None))
+                timestamp=ratio_timestamp)
 
         return AgentOutput(agent_name=self.agent_name, symbol=symbol, run_id=run_id,
             status=AgentStatus.SUCCESS if metrics_evaluated else AgentStatus.DATA_UNAVAILABLE,
