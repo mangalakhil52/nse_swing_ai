@@ -80,7 +80,8 @@ async def test_future_nifty_mutation_cannot_change_decision():
     assert a.signal == b.signal
     assert a.score == b.score
     assert a.pit_safe == b.pit_safe
-    assert a.evidence[0].observed_value == b.evidence[0].observed_value
+    # StructuredEvidence uses `observation` as its canonical human-readable field.
+    assert a.evidence[0].observation == b.evidence[0].observation
 
 
 @pytest.mark.asyncio
