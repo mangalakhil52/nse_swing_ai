@@ -33,7 +33,7 @@ class FundamentalAnalysisAgent(BaseAgent):
 
         if not quarterly and ratios is None:
             return AgentOutput(agent_name=self.agent_name, symbol=symbol, run_id=run_id,
-                status=AgentStatus.DATA_UNAVAILABLE, signal=SignalType.UNKNOWN, score=0.0,
+                status=AgentStatus.DATA_UNAVAILABLE, signal=SignalType.NEUTRAL, score=0.0,
                 confidence=None, data_freshness=DataFreshness.UNKNOWN,
                 metrics={"status": "FUNDAMENTALS_UNAVAILABLE"}, evidence=[],
                 risks_identified=["Fundamental financial data unavailable."])
