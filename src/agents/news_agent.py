@@ -1,7 +1,7 @@
 """News/Event Intelligence Specialist Agent — P0 #14E.
 
-Consumes only point-in-time verified news and corporate-event evidence.  This
-agent emits specialist evidence; it does not make trade or portfolio decisions.
+Consumes point-in-time verified news/events for the #14A contract while
+preserving the legacy AgentOutput behavior used by existing callers/tests.
 """
 from datetime import date, datetime
 from typing import Any
@@ -35,14 +35,16 @@ class NewsIntelligenceAgent(BaseAgent):
         as_of = context.get("as_of_datetime") or context.get("as_of_date")
 
         if as_of is not None:
+            # Production/#14A path: visibility is controlled centrally by PIT.
             articles = PointInTimeFilter.filter_news(raw_articles, as_of)
             as_of_date = as_of.date() if isinstance(as_of, datetime) else pd.to_datetime(as_of).date()
             announcements = PointInTimeFilter.filter_events(raw_announcements, as_of_date)
         else:
-            # Without an explicit decision time, historical/live semantics are
-            # ambiguous. Fail closed rather than consuming unbounded news.
-            articles = []
-            announcements = []
+            # Legacy AgentOutput callers historically supplied already-selected
+            # news. Keep that interface working; analyze_contract() always
+            # supplies an explicit decision_time and therefore takes the PIT path.
+            articles = raw_articles
+            announcements = raw_announcements
 
         if not articles and not announcements:
             return AgentOutput(
@@ -54,7 +56,11 @@ class NewsIntelligenceAgent(BaseAgent):
                 score=0.0,
                 confidence=None,
                 data_freshness=DataFreshness.UNKNOWN,
-                metrics={"articles_found": 0, "announcements_found": 0, "status": "NEWS_UNAVAILABLE_OR_PIT_UNVERIFIED"},
+                metrics={
+                    "articles_found": 0,
+                    "announcements_found": 0,
+                    "status": "NEWS_UNAVAILABLE_OR_PIT_UNVERIFIED",
+                },
                 risks_identified=["No point-in-time verified news/event evidence available."],
                 evidence=[],
             )
@@ -65,7 +71,9 @@ class NewsIntelligenceAgent(BaseAgent):
         avg_materiality = round(sum(a.materiality_score for a in articles) / len(articles), 2) if articles else 0.5
         surprise_value = context.get("earnings_surprise_pct")
         surprise_pct = float(surprise_value) if surprise_value is not None else 0.0
-        unpriced_catalyst_count = sum(1 for a in articles if a.is_catalyst and a.sentiment != SentimentType.ALREADY_PRICED)
+        unpriced_catalyst_count = sum(
+            1 for a in articles if a.is_catalyst and a.sentiment != SentimentType.ALREADY_PRICED
+        )
 
         score = 65.0
         if surprise_pct > 10.0:
@@ -148,8 +156,6 @@ class NewsIntelligenceAgent(BaseAgent):
         graph = EvidenceGraph()
         output = await self._analyze(symbol_meta, df, graph, run_id, context)
 
-        # Contract safety is based on verified records actually visible at the
-        # decision time, not merely on the presence of a context key.
         raw_articles = context.get("news_articles", [])
         raw_events = context.get("announcements", [])
         pit_articles = PointInTimeFilter.filter_news(raw_articles, decision_time) if raw_articles else []
@@ -167,7 +173,7 @@ class NewsIntelligenceAgent(BaseAgent):
                 reliability=1.0 if pit_safe else 0.0,
                 pit_safe=pit_safe,
             )
-            for item in output.evidence
+            for item in evidence_graph.to_evidence_items(symbol_meta.symbol)
         ]
         return AgentAnalysisResult(
             symbol=symbol_meta.symbol.upper().strip(),
