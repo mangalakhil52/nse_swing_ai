@@ -6,7 +6,6 @@ classifies, and preserves evidence before conviction/risk/CIO synthesis.
 from datetime import date, datetime
 from src.architecture.contracts import AgentAnalysisResult, EvidenceFusionEngine, FusionResult
 from src.core.models import SymbolMetadata
-from src.core.types import DataQualityStatus
 
 
 class EvidenceFusionService:
