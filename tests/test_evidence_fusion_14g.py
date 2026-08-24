@@ -4,7 +4,8 @@ import pytest
 from src.architecture.evidence_fusion import EvidenceFusionService
 from src.architecture.contracts import AgentAnalysisResult, StructuredEvidence
 from src.core.models import SymbolMetadata
-from src.core.types import AgentStatus, DataQualityStatus, SignalType
+from src.core.types import AgentStatus, SignalType
+from src.data.data_quality import DataQualityStatus
 
 
 def _dq(pit_safe=True):
