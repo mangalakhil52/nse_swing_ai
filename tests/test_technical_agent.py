@@ -1,6 +1,7 @@
 """P0 #14C tests for the deterministic TechnicalAnalysisAgent."""
 
 import asyncio
+
 import numpy as np
 import pandas as pd
 
@@ -20,8 +21,7 @@ def _ohlcv(n: int = 240, start: str = "2025-08-01") -> pd.DataFrame:
     low = close - 2.0
     volume = np.full(n, 100_000, dtype=float)
     volume[-1] = 250_000
-    return pd.DataFrame({"timestamp": idx, "open": open_, "high": high, "low": low,
-                         "close": close, "volume": volume})
+    return pd.DataFrame({"timestamp": idx, "open": open_, "high": high, "low": low, "close": close, "volume": volume})
 
 
 def _meta(symbol: str = "TEST") -> SymbolMetadata:
@@ -32,6 +32,7 @@ def test_technical_agent_returns_architecture_contract():
     df = _ohlcv()
     decision_time = df["timestamp"].iloc[-1].to_pydatetime()
     result = asyncio.run(TechnicalAnalysisAgent().analyze_contract(_meta(), df, decision_time, "run-14c"))
+
     assert isinstance(result, AgentAnalysisResult)
     assert result.symbol == "TEST"
     assert result.agent_name == "technical_analysis_agent"
@@ -61,15 +62,17 @@ def test_future_rows_cannot_change_contract_at_decision_time():
     assert baseline.signal == changed.signal
     assert baseline.score == changed.score
     assert baseline.confidence == changed.confidence
-    assert baseline.metrics if hasattr(baseline, "metrics") else True
+    assert baseline.evidence == changed.evidence
 
 
 def test_missing_history_returns_unknown_and_not_bullish():
     df = _ohlcv(20)
     decision_time = df["timestamp"].iloc[-1].to_pydatetime()
     result = asyncio.run(TechnicalAnalysisAgent().analyze_contract(_meta(), df, decision_time, "short"))
+
     assert result.signal == SignalType.UNKNOWN
     assert result.score == 0.0
+    assert result.confidence == 0.0
     assert result.pit_safe is True
     assert "INSUFFICIENT_HISTORY" in result.reasons or "OHLC_INSUFFICIENT_BARS" in result.reasons
 
@@ -78,6 +81,7 @@ def test_technical_agent_does_not_emit_trade_levels():
     df = _ohlcv()
     decision_time = df["timestamp"].iloc[-1].to_pydatetime()
     result = asyncio.run(TechnicalAnalysisAgent().analyze_contract(_meta(), df, decision_time, "levels"))
+
     payload = result.model_dump()
     assert "target" not in str(payload).lower()
     assert "stop_loss" not in str(payload).lower()
