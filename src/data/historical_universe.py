@@ -25,10 +25,7 @@ class HistoricalUniverseProvider:
 
     @classmethod
     def get_current_universe(cls) -> list[str]:
-        """
-        Return the current NSE equity universe from the locally cached official
-        security master. A restricted/hardcoded watchlist is never substituted.
-        """
+        """Return the current NSE equity universe from the official cached security master."""
         cache_file = Path(settings.CACHE_DIR) / "bhavcopy" / "EQUITY_L.csv"
         if not cache_file.exists():
             raise HistoricalUniverseUnavailableError(
@@ -63,38 +60,22 @@ class HistoricalUniverseProvider:
             ) from exc
 
     @classmethod
-    def filter_universe_by_date(
-        cls, securities: list[SymbolMetadata], as_of_date: date
-    ) -> list[SymbolMetadata]:
+    def filter_universe_by_date(cls, securities: list[SymbolMetadata], as_of_date: date) -> list[SymbolMetadata]:
         """Filter supplied security metadata using listing/delisting dates."""
         eligible: list[SymbolMetadata] = []
         for sec in securities:
             if sec.listing_date and sec.listing_date > as_of_date:
-                logger.debug(
-                    "Excluding %s: listed on %s > as_of_date %s",
-                    sec.symbol, sec.listing_date, as_of_date,
-                )
+                logger.debug("Excluding %s: listed on %s > as_of_date %s", sec.symbol, sec.listing_date, as_of_date)
                 continue
             if sec.delisting_date and sec.delisting_date <= as_of_date:
-                logger.debug(
-                    "Excluding %s: delisted on %s <= as_of_date %s",
-                    sec.symbol, sec.delisting_date, as_of_date,
-                )
+                logger.debug("Excluding %s: delisted on %s <= as_of_date %s", sec.symbol, sec.delisting_date, as_of_date)
                 continue
             eligible.append(sec)
         return eligible
 
     @classmethod
-    def get_universe_for_date(
-        cls, as_of_date: date, securities: list[SymbolMetadata] | None = None
-    ) -> list[str]:
-        """
-        Return symbols eligible at ``as_of_date``.
-
-        Historical mode intentionally fails closed when a historical security
-        master is not supplied; using today's universe for a historical date
-        would introduce survivorship bias.
-        """
+    def get_universe_for_date(cls, as_of_date: date, securities: list[SymbolMetadata] | None = None) -> list[str]:
+        """Return symbols eligible at ``as_of_date``; fail closed without historical metadata."""
         if securities is not None:
             filtered_metadata = cls.filter_universe_by_date(securities, as_of_date)
             return [s.symbol for s in filtered_metadata]
@@ -102,5 +83,5 @@ class HistoricalUniverseProvider:
         raise HistoricalUniverseUnavailableError(
             f"Historical security master unavailable for as_of_date={as_of_date}. "
             "Pass explicit SymbolMetadata with listing/delisting metadata. "
-            "Fallback to the current live universe is forbidden."
+            "Fallback to current live watchlist is strictly forbidden."
         )
