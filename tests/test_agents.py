@@ -40,7 +40,8 @@ def test_technical_agent_bullish_setup():
         df = _make_bullish_df()
         meta = SymbolMetadata(symbol="TRENT", company_name="Trent Ltd", sector="Retail")
         ev = EvidenceGraph("RUN-TEST")
-        out = await agent.execute(meta, df, ev, "RUN-TEST", {})
+        # #14A requires an explicit decision timestamp for historical-safe execution.
+        out = await agent.execute(meta, df, ev, "RUN-TEST", {"decision_time": date(2026, 6, 30)})
         assert out.status == AgentStatus.SUCCESS
         assert out.signal == SignalType.BULLISH
         assert out.score > 70.0
@@ -72,7 +73,7 @@ def test_forensic_agent_flags_high_pledge():
             symbol="RISKY",
             quarter_date=date(2026, 6, 30),
             promoter_pct=55.0,
-            promoter_pledged_pct=25.0,  # > 20% threshold -> disqualify
+            promoter_pledged_pct=25.0,
             fii_pct=10.0,
         )
         ratios = AnnualRatios(
@@ -117,9 +118,6 @@ def test_cio_orchestrator_full_pipeline():
             "upcoming_events": [],
         }
         rec, _ = await cio.analyze_candidate(meta, df, "RUN-TEST-01", ctx)
-        # In a bull regime with strong uptrend, candidate should produce a recommendation
-        # (May be None if score is below conviction threshold - that's acceptable behavior)
-        # Just verify no exception is raised and if rec is produced it has valid fields
         if rec is not None:
             assert rec.symbol == "TRENT"
             assert rec.composite_score >= 60.0
