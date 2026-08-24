@@ -5,12 +5,19 @@ from src.architecture.evidence_fusion import EvidenceFusionService
 from src.architecture.contracts import AgentAnalysisResult, StructuredEvidence
 from src.core.models import SymbolMetadata
 from src.core.types import AgentStatus, SignalType
-from src.data.data_quality import DataQualityStatus
+from src.data.data_quality import DataQualityResult, DataQualityStatus
 
 
 def _dq(pit_safe=True):
-    from src.data.data_quality import DataQualityResult
-    return DataQualityResult(overall_status=DataQualityStatus.OK, pit_safe=pit_safe, source_results=[])
+    return DataQualityResult(
+        symbol="TRENT",
+        as_of_date=date(2026, 6, 30),
+        overall_status=DataQualityStatus.VALID if pit_safe else DataQualityStatus.PIT_VIOLATION,
+        overall_quality_score=100.0 if pit_safe else 0.0,
+        pit_safe=pit_safe,
+        is_trade_eligible=pit_safe,
+        sources={},
+    )
 
 
 def _result(symbol, agent, signal, pit=True):
