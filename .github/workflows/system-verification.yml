@@ -56,11 +56,6 @@ jobs:
 
               symbols = {x.symbol for x in universe}
               assert len(symbols) == len(universe), 'Duplicate symbols found'
-
-              # The broad NSE equity universe must not be restricted to F&O.
-              # Current provider metadata deliberately does not claim F&O
-              # eligibility from EQUITY_L.csv, so this is an API-contract check:
-              # every returned security must be an active NSE equity security.
               assert all(x.exchange == 'NSE' for x in universe)
               assert all(x.is_active for x in universe)
 
@@ -74,14 +69,13 @@ jobs:
           python - <<'PY'
           from src.data.historical_universe import HistoricalUniverseProvider
 
-          universe = HistoricalUniverseProvider.get_current_universe()
-          symbols = [x.symbol for x in universe]
+          symbols = HistoricalUniverseProvider.get_current_universe()
 
-          print(f'Current universe size: {len(universe)}')
+          print(f'Current universe size: {len(symbols)}')
           print('Sample symbols:', symbols[:20])
 
-          assert len(universe) > 1000, (
-              f'Current universe unexpectedly small: {len(universe)}'
+          assert len(symbols) > 1000, (
+              f'Current universe unexpectedly small: {len(symbols)}'
           )
           assert len(symbols) == len(set(symbols)), 'Duplicate symbols found'
 
@@ -107,6 +101,6 @@ jobs:
               )
           PY
 
-      - name: Verify candidate discovery tests explicitly
+      - name: Verify candidate discovery and technical agent tests
         run: |
           pytest -q tests/test_candidate_discovery.py tests/test_technical_agent.py
