@@ -1,6 +1,6 @@
 """#14M NSE universe adapter tests."""
 from datetime import date
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 import pytest
 from src.data.nse_universe_adapter import NSEUniverseAdapter
 
@@ -33,11 +33,11 @@ def test_empty_source_fails_closed():
 
 
 def test_transient_download_failure_retries():
-    with patch("src.data.nse_universe_adapter.urlopen") as open_mock:
-        response = open_mock.return_value.__enter__.return_value
-        response.read.return_value = CSV.encode()
-        open_mock.side_effect = [OSError("temporary"), response]
+    successful_response = MagicMock()
+    successful_response.__enter__.return_value.read.return_value = CSV.encode()
+    with patch("src.data.nse_universe_adapter.urlopen", side_effect=[OSError("temporary"), successful_response]) as open_mock:
         with patch("src.data.nse_universe_adapter.time.sleep") as sleep:
             snap = NSEUniverseAdapter("https://example.test/universe.csv", retries=2).fetch()
     assert len(snap.symbols) == 2
+    assert open_mock.call_count == 2
     sleep.assert_called_once_with(1)
