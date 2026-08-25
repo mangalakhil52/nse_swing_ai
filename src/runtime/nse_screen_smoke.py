@@ -56,7 +56,10 @@ def run(as_of_date: date, lookback_calendar_days: int = 140, max_workers: int = 
             except Exception:
                 errors += 1
 
-    data_available = sum(r.symbol in market_data for r in results)
+    # Availability is determined from the requested universe symbols, not from
+    # CandidateDiscoveryResult.symbol, whose domain type may be UniverseSymbol.
+    available_symbols = set(market_data)
+    data_available = sum(item.symbol in available_symbols for item in universe)
     eligible = sum(bool(r.eligible) for r in results)
     summary = ScreenSummary(
         as_of_date=as_of_date.isoformat(),
@@ -69,4 +72,4 @@ def run(as_of_date: date, lookback_calendar_days: int = 140, max_workers: int = 
         errors=errors,
         historical_diagnostics=diagnostic,
     )
-    return summary, sorted(results, key=lambda r: (-(r.discovery_score if r.discovery_score is not None else float("-inf")), r.symbol))
+    return summary, sorted(results, key=lambda r: (-(r.discovery_score if r.discovery_score is not None else float("-inf")), str(r.symbol)))
