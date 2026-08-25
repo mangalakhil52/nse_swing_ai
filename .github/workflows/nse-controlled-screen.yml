@@ -1,0 +1,70 @@
+name: NSE Controlled Screen
+
+on:
+  workflow_dispatch:
+    inputs:
+      as_of:
+        description: 'Trading date (YYYY-MM-DD)'
+        required: false
+        default: ''
+        type: string
+      limit:
+        description: 'Number of NSE symbols to screen'
+        required: false
+        default: '50'
+        type: string
+      workers:
+        description: 'Concurrent workers'
+        required: false
+        default: '4'
+        type: string
+      lookback:
+        description: 'Historical calendar-day lookback'
+        required: false
+        default: '140'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  controlled-screen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Resolve screening date
+        id: params
+        shell: bash
+        run: |
+          AS_OF='${{ inputs.as_of }}'
+          if [ -z "$AS_OF" ]; then
+            AS_OF=$(date -u +%F)
+          fi
+          echo "as_of=$AS_OF" >> "$GITHUB_OUTPUT"
+
+      - name: Run controlled NSE Candidate Discovery
+        run: |
+          python -m src.runtime.nse_screen_smoke_cli \
+            --as-of '${{ steps.params.outputs.as_of }}' \
+            --limit '${{ inputs.limit }}' \
+            --workers '${{ inputs.workers }}' \
+            --lookback '${{ inputs.lookback }}' | tee nse_screen_result.json
+
+      - name: Publish screening result
+        uses: actions/upload-artifact@v4
+        with:
+          name: nse-controlled-screen-${{ steps.params.outputs.as_of }}
+          path: nse_screen_result.json
+          if-no-files-found: error
