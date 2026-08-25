@@ -68,15 +68,19 @@ class TechnicalAnalysisAgent(BaseAgent):
         top_pattern = matched_patterns[0] if matched_patterns else None
 
         # Preserve the existing deterministic specialist score; this is NOT final conviction.
-        score = 40.0
-        if close > ema_20: score += 10.0
-        if ema_20 > ema_50: score += 10.0
-        if close > ema_200: score += 10.0
-        if 58.0 <= rsi <= 74.0: score += 10.0
-        elif 50.0 <= rsi < 58.0: score += 5.0
-        if adx >= 25.0: score += 5.0
-        if top_pattern and top_pattern.is_matched: score += min(15.0, top_pattern.quality_score * 0.16)
-        if rvol >= 1.5: score += 5.0
+        raw_score = 40.0
+        if close > ema_20: raw_score += 10.0
+        if ema_20 > ema_50: raw_score += 10.0
+        if close > ema_200: raw_score += 10.0
+        if 58.0 <= rsi <= 74.0: raw_score += 10.0
+        elif 50.0 <= rsi < 58.0: raw_score += 5.0
+        if adx >= 25.0: raw_score += 5.0
+        if top_pattern and top_pattern.is_matched: raw_score += min(15.0, top_pattern.quality_score * 0.16)
+        if rvol >= 1.5: raw_score += 5.0
+        # AgentOutput.score is contractually bounded to [0, 100]. The component
+        # bonuses above can legitimately total slightly above 100, so clamp rather
+        # than allowing an otherwise valid technical analysis to fail validation.
+        score = min(100.0, max(0.0, raw_score))
 
         bar_factor = min(1.0, len(df) / 100.0)
         pattern_bonus = 0.12 if (top_pattern and top_pattern.is_matched) else 0.0
