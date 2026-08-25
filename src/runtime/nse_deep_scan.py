@@ -15,6 +15,7 @@ import pandas as pd
 
 from config.market_hours import get_latest_trading_day
 from src.agents.cio_orchestrator import CIOOrchestrator
+from src.data.historical_provider import HistoricalDataProvider
 from src.data.market_universe import MarketUniverseService
 from src.data.nse_historical_source import NSEHistoricalOHLCVSource
 from src.data.nse_official_source import NSEOfficialUniverseSource
@@ -63,7 +64,6 @@ def run(
     """Run the expensive CIO pipeline only on the validated technical shortlist."""
     as_of_date = as_of_date or get_latest_trading_day(date.today())
 
-    # Stage 1 + technical intelligence. This is the authoritative dynamic scan.
     swing_summary, technical_rows = run_swing_scan(
         as_of_date=as_of_date,
         lookback_calendar_days=lookback_calendar_days,
@@ -76,13 +76,9 @@ def run(
     universe_items = MarketUniverseService.normalize(raw_universe, as_of_date)
     universe = {item.symbol: item for item in universe_items}
 
-    # Reuse the same bulk historical source. The cache keeps this cheap when the
-    # runner is embedded in a process; the API also remains safe as a standalone run.
     source = NSEHistoricalOHLCVSource(as_of_date, lookback_calendar_days=lookback_calendar_days)
     market_data = source.fetch_many(symbols)
 
-    # Market regime is a global gate, not an alpha contribution.
-    from src.data.historical_provider import HistoricalDataProvider
     hist_provider = HistoricalDataProvider()
     start = as_of_date - timedelta(days=lookback_calendar_days)
 
@@ -112,10 +108,8 @@ def run(
         )
         return summary, []
 
-    # Existing QuantScreener creates the canonical ScreenerCandidate contract
-    # required by CIO. It is deliberately applied only to the technical shortlist.
     screener = QuantScreener(min_adtv_crores=5.0, min_price=20.0)
-    nifty_df = pd.DataFrame()
+
     async def load_nifty():
         provider = HistoricalDataProvider()
         try:
@@ -124,6 +118,7 @@ def run(
             return pd.DataFrame()
         finally:
             await provider.close()
+
     nifty_df = asyncio.run(load_nifty())
 
     deep_candidates: list[ScreenerCandidate] = []
