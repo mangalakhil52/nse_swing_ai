@@ -33,18 +33,11 @@ class Settings(BaseSettings):
     REQUEST_TIMEOUT_SECONDS: int = Field(default=20)
     USER_AGENT: str = Field(default="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125.0.0.0 Safari/537.36")
 
-    # Optional secondary evidence provider. Core scanning works with these disabled.
+    # Optional secondary evidence provider. Core scanning works with this disabled.
     INDIANAPI_API_KEY: str = Field(default="")
     INDIANAPI_BASE_URL: str = Field(default="https://analyst.indianapi.in")
     INDIANAPI_TIMEOUT_SECONDS: int = Field(default=15)
     INDIANAPI_ENABLED: bool = Field(default=False)
-
-    # Optional market-data provider. Never required for core EOD scanning.
-    TRUEDATA_USERNAME: str = Field(default="")
-    TRUEDATA_PASSWORD: str = Field(default="")
-    TRUEDATA_BASE_URL: str = Field(default="https://api.truedata.in")
-    TRUEDATA_TIMEOUT_SECONDS: int = Field(default=15)
-    TRUEDATA_ENABLED: bool = Field(default=False)
 
     STT_PCT: float = Field(default=0.1)
     BROKERAGE_MAX_RUPEES: float = Field(default=20.0)
