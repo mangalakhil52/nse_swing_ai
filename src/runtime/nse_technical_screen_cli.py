@@ -2,6 +2,7 @@
 from __future__ import annotations
 import argparse
 import json
+from dataclasses import asdict
 from datetime import date
 from src.runtime.nse_technical_screen import run
 
@@ -23,5 +24,4 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    from dataclasses import asdict
     raise SystemExit(main())
