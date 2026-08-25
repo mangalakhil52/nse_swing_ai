@@ -1,0 +1,84 @@
+"""Official NSE public-file sources.
+
+NSE publishes the equity master at nsearchives.nseindia.com and CM-UDiFF
+bhavcopies as dated ZIP/CSV files. These adapters use those official files
+rather than a third-party market-data API.
+"""
+from __future__ import annotations
+import io
+import zipfile
+from datetime import date
+import pandas as pd
+import requests
+
+
+class NSEOfficialUniverseSource:
+    URL = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
+
+    def __init__(self, timeout_seconds: float = 20.0):
+        self.timeout_seconds = timeout_seconds
+
+    def fetch(self) -> list[dict]:
+        headers = {"User-Agent": "Mozilla/5.0", "Accept": "text/csv,application/octet-stream"}
+        with requests.Session() as session:
+            session.headers.update(headers)
+            response = session.get(self.URL, timeout=self.timeout_seconds)
+            response.raise_for_status()
+        df = pd.read_csv(io.BytesIO(response.content))
+        required = {"SYMBOL", "SERIES"}
+        if not required.issubset(df.columns):
+            raise ValueError(f"NSE equity master missing columns: {sorted(required - set(df.columns))}")
+        rows = []
+        for row in df.itertuples(index=False):
+            if str(getattr(row, "SERIES", "")).strip().upper() in {"EQ", "BE", "BZ"}:
+                rows.append({"symbol": str(getattr(row, "SYMBOL", "")).strip().upper(), "exchange": "NSE"})
+        if not rows:
+            raise ValueError("NSE equity master returned no eligible equity symbols")
+        return rows
+
+
+class NSEOfficialBhavcopySource:
+    URL_TEMPLATE = "https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{date}_F_0000.csv.zip"
+
+    def __init__(self, as_of_date: date, timeout_seconds: float = 20.0):
+        self.as_of_date = as_of_date
+        self.timeout_seconds = timeout_seconds
+        self._frame: pd.DataFrame | None = None
+
+    def fetch(self, symbol: str) -> pd.DataFrame:
+        if self._frame is None:
+            self._frame = self._download_frame()
+        df = self._frame[self._frame["symbol"].eq(symbol.upper())].copy()
+        if df.empty:
+            raise ValueError(f"No NSE bhavcopy row for {symbol} on {self.as_of_date}")
+        return df[["timestamp", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
+
+    def _download_frame(self) -> pd.DataFrame:
+        url = self.URL_TEMPLATE.format(date=self.as_of_date.strftime("%Y%m%d"))
+        headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/zip,application/octet-stream"}
+        with requests.Session() as session:
+            session.headers.update(headers)
+            response = session.get(url, timeout=self.timeout_seconds)
+            response.raise_for_status()
+        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+            csv_names = [n for n in archive.namelist() if n.lower().endswith(".csv")]
+            if not csv_names:
+                raise ValueError("NSE bhavcopy ZIP contains no CSV")
+            with archive.open(csv_names[0]) as handle:
+                raw = pd.read_csv(handle)
+        required = {"TckrSymb", "TradDt", "OpnPric", "HghPric", "LwPric", "ClsPric", "TtlTradgVol"}
+        if not required.issubset(raw.columns):
+            raise ValueError(f"NSE UDiFF bhavcopy missing columns: {sorted(required - set(raw.columns))}")
+        out = pd.DataFrame({
+            "symbol": raw["TckrSymb"].astype(str).str.strip().str.upper(),
+            "timestamp": pd.to_datetime(raw["TradDt"], errors="coerce"),
+            "open": pd.to_numeric(raw["OpnPric"], errors="coerce"),
+            "high": pd.to_numeric(raw["HghPric"], errors="coerce"),
+            "low": pd.to_numeric(raw["LwPric"], errors="coerce"),
+            "close": pd.to_numeric(raw["ClsPric"], errors="coerce"),
+            "volume": pd.to_numeric(raw["TtlTradgVol"], errors="coerce"),
+        }).dropna()
+        out = out[out["timestamp"].dt.date <= self.as_of_date]
+        if out.empty:
+            raise ValueError("NSE bhavcopy contains no valid point-in-time rows")
+        return out
