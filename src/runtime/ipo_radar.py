@@ -1,21 +1,19 @@
-"""Recent-IPO opportunity radar.
+"""Recent-listing opportunity radar.
 
-Recent listings deserve a separate research track because a normal screen that
-requires long history can systematically exclude them. This module does NOT
-relax the main Candidate Discovery rules. It creates a separate, conservative
-radar using only bars available on/before the decision date.
+A short-history track is useful because the normal swing screen intentionally
+requires longer history. This module identifies recent NSE listings without
+claiming that the first observed OHLCV bar was an IPO.
 
-Listing date is inferred from the first observed OHLCV bar in the supplied
-lookback window. A symbol is only labelled a recent listing when the first bar
-is recent and the history is continuous enough to make the inference useful.
-This deliberately avoids claiming an IPO from an arbitrary data gap.
+NSE can have new listings through IPOs, direct listings, migrations and
+re-listings. OHLCV alone cannot establish the issuance route, so this radar
+labels the track RECENT_LISTING and leaves listing_type UNKNOWN until a
+separately verified primary-market/NSE source is available.
 """
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 from datetime import date
 import math
-
 import pandas as pd
 
 
@@ -34,7 +32,8 @@ class IPOOpportunity:
     consolidation_pct: float | None
     breakout: bool
     score: float
-    track: str = "RECENT_IPO"
+    track: str = "RECENT_LISTING"
+    listing_type: str = "UNKNOWN"
     reasons: list[str] | None = None
 
     def to_dict(self) -> dict:
@@ -42,16 +41,11 @@ class IPOOpportunity:
 
 
 class RecentIPORadar:
-    """Conservative scanner for recent listings excluded by long-history rules."""
+    """Conservative recent-listing scanner; deliberately not an IPO classifier."""
 
-    def __init__(
-        self,
-        as_of_date: date,
-        max_age_days: int = 180,
-        min_bars: int = 10,
-        min_turnover_crores: float = 1.0,
-        min_price: float = 20.0,
-    ):
+    def __init__(self, as_of_date: date, max_age_days: int = 180,
+                 min_bars: int = 10, min_turnover_crores: float = 1.0,
+                 min_price: float = 20.0):
         self.as_of_date = as_of_date
         self.max_age_days = max_age_days
         self.min_bars = min_bars
@@ -63,14 +57,10 @@ class RecentIPORadar:
         if df is None or df.empty:
             return pd.DataFrame()
         out = df.copy()
-        if "timestamp" in out.columns:
-            out["timestamp"] = pd.to_datetime(out["timestamp"], errors="coerce")
-            out = out.dropna(subset=["timestamp"]).sort_values("timestamp")
-        else:
-            out = out.reset_index(drop=True)
-        required = {"close", "volume"}
-        if not required.issubset(out.columns):
+        if "timestamp" not in out.columns or not {"close", "volume"}.issubset(out.columns):
             return pd.DataFrame()
+        out["timestamp"] = pd.to_datetime(out["timestamp"], errors="coerce")
+        out = out.dropna(subset=["timestamp"]).sort_values("timestamp")
         for col in ["close", "volume"]:
             out[col] = pd.to_numeric(out[col], errors="coerce")
         if "turnover_crores" not in out.columns:
@@ -83,22 +73,17 @@ class RecentIPORadar:
         data = self._prepare(df)
         if data.empty or len(data) < self.min_bars:
             return None
-
         first = data.iloc[0]
         last = data.iloc[-1]
-        first_ts = pd.Timestamp(first["timestamp"]).date() if "timestamp" in data.columns else None
-        if first_ts is None:
-            return None
+        first_ts = pd.Timestamp(first["timestamp"]).date()
         age = (self.as_of_date - first_ts).days
         if age < 0 or age > self.max_age_days:
             return None
 
-        # A genuine recent listing should have a reasonably continuous early history.
-        # This guards against mistaking a data outage/suspension for an IPO.
-        if len(data) >= 11 and "timestamp" in data.columns:
-            gaps = data["timestamp"].dt.normalize().diff().dt.days.dropna()
-            if not gaps.empty and float(gaps.head(min(15, len(gaps))).max()) > 7:
-                return None
+        # Guard against confusing a data outage/suspension with a new listing.
+        gaps = data["timestamp"].dt.normalize().diff().dt.days.dropna()
+        if len(data) >= 11 and not gaps.empty and float(gaps.head(min(15, len(gaps))).max()) > 7:
+            return None
 
         last_close = float(last["close"])
         median_turnover = float(data["turnover_crores"].tail(min(20, len(data))).median())
@@ -109,7 +94,6 @@ class RecentIPORadar:
         return_since_first = (last_close / first_close - 1.0) * 100.0 if first_close > 0 else 0.0
         peak = float(data["close"].cummax().iloc[-1])
         drawdown = (last_close / peak - 1.0) * 100.0 if peak > 0 else 0.0
-
         recent = data.tail(min(5, len(data)))
         last_5 = (float(recent["close"].iloc[-1]) / float(recent["close"].iloc[0]) - 1.0) * 100.0
 
@@ -135,7 +119,6 @@ class RecentIPORadar:
         elif return_since_first < -15:
             score -= 12.0
             reasons.append("WEAK_POST_LISTING_TREND")
-
         if last_5 > 3:
             score += 8.0
             reasons.append("RECENT_MOMENTUM")
@@ -152,7 +135,6 @@ class RecentIPORadar:
             score -= min(12.0, abs(drawdown) * 0.3)
             reasons.append("DEEP_DRAW_DOWN")
 
-        score = max(0.0, min(100.0, score))
         return IPOOpportunity(
             symbol=symbol.upper(),
             inferred_listing_date=first_ts.isoformat(),
@@ -166,7 +148,8 @@ class RecentIPORadar:
             volume_ratio_5_vs_20=round(vol_ratio, 2) if vol_ratio is not None and math.isfinite(vol_ratio) else None,
             consolidation_pct=round(consolidation, 2) if consolidation is not None else None,
             breakout=breakout,
-            score=round(score, 2),
+            score=round(max(0.0, min(100.0, score)), 2),
+            listing_type="UNKNOWN",
             reasons=reasons,
         )
 
