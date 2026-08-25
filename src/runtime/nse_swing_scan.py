@@ -1,27 +1,10 @@
-"""Dynamic whole-NSE swing scanner.
-
-Pipeline:
-  1. Fetch the current NSE equity universe dynamically.
-  2. Download historical NSE bhavcopies once per trading day.
-  3. Run the cheap Candidate Discovery filters across the whole universe.
-  4. Run the existing deterministic Technical Analysis specialist on every
-     eligible candidate.
-  5. Run a separate conservative Recent IPO radar so short-history listings
-     are not systematically excluded by the normal long-history funnel.
-  6. Rank the regular candidates by technical score.
-
-The IPO track is intentionally separate: it never weakens the normal screen and
-never fabricates a listing date. Its inferred listing date is based on the first
-observed bar inside the lookback window and is only used when the early history
-looks continuous enough to support that inference.
-"""
+"""Dynamic whole-NSE swing scanner with normal and recent-listing tracks."""
 from __future__ import annotations
 
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import date
-
 import pandas as pd
 
 from src.agents.technical_agent import TechnicalAnalysisAgent
@@ -58,6 +41,9 @@ class SwingScanSummary:
     technical_success_count: int
     technical_failure_count: int
     shortlist_count: int
+    recent_listing_count: int
+    recent_listing_shortlist: list[dict]
+    # Deprecated aliases retained for consumers that have not migrated yet.
     ipo_opportunity_count: int
     ipo_shortlist: list[dict]
     historical_diagnostics: dict
@@ -67,31 +53,18 @@ async def _analyze_technical(symbol: str, df: pd.DataFrame, as_of: date):
     meta = SymbolMetadata(symbol=symbol, company_name=symbol, exchange="NSE")
     agent = TechnicalAnalysisAgent()
     graph = EvidenceGraph()
-    return await agent.execute(
-        meta,
-        df,
-        graph,
-        run_id=f"NSE-SCAN-{as_of.isoformat()}",
-        context={"decision_time": as_of},
-    )
+    return await agent.execute(meta, df, graph,
+                               run_id=f"NSE-SCAN-{as_of.isoformat()}",
+                               context={"decision_time": as_of})
 
 
-def run(
-    as_of_date: date,
-    lookback_calendar_days: int = 260,
-    max_workers: int = 8,
-    shortlist_size: int = 50,
-    min_price: float | None = None,
-    min_adtv_crores: float | None = None,
-) -> tuple[SwingScanSummary, list[TechnicalShortlistRow]]:
-    """Run a dynamic full-NSE candidate-to-technical shortlist scan."""
+def run(as_of_date: date, lookback_calendar_days: int = 260,
+        max_workers: int = 8, shortlist_size: int = 50,
+        min_price: float | None = None,
+        min_adtv_crores: float | None = None):
     raw_universe = NSEOfficialUniverseSource().fetch()
     universe = MarketUniverseService.normalize(raw_universe, as_of_date)
-
-    source = NSEHistoricalOHLCVSource(
-        as_of_date,
-        lookback_calendar_days=lookback_calendar_days,
-    )
+    source = NSEHistoricalOHLCVSource(as_of_date, lookback_calendar_days=lookback_calendar_days)
     market_data = source.fetch_many([item.symbol for item in universe])
     diagnostics = asdict(source.diagnostics)
 
@@ -102,21 +75,16 @@ def run(
         config.min_average_turnover_crores = min_adtv_crores
 
     discovery_results = CandidateDiscoveryEngine.discover_candidates(
-        universe=[item.symbol for item in universe],
-        as_of_date=as_of_date,
-        market_data_map=market_data,
-        config=config,
-        mode="LIVE",
-    )
+        universe=[item.symbol for item in universe], as_of_date=as_of_date,
+        market_data_map=market_data, config=config, mode="LIVE")
     eligible = [r for r in discovery_results if r.eligible and r.pit_safe]
 
-    # Separate IPO track. It intentionally runs on the full market_data map,
-    # including symbols rejected by the normal long-history screen.
-    ipo_radar = RecentIPORadar(as_of_date=as_of_date)
-    ipo_rows: list[IPOOpportunity] = ipo_radar.scan(market_data, limit=25)
+    # Short-history track. It is intentionally a RECENT_LISTING radar, not an
+    # IPO classifier: OHLCV cannot distinguish IPOs from direct listings,
+    # migrations or relistings.
+    listing_radar = RecentIPORadar(as_of_date=as_of_date)
+    listing_rows: list[IPOOpportunity] = listing_radar.scan(market_data, limit=25)
 
-    # The technical agent is async but performs CPU-bound pandas calculations.
-    # Run each candidate in a worker thread so --workers controls parallelism.
     def analyze_sync(result):
         df = market_data.get(result.symbol, pd.DataFrame())
         return result, asyncio.run(_analyze_technical(result.symbol, df, as_of_date))
@@ -134,25 +102,24 @@ def run(
             if output.status.value != "SUCCESS":
                 technical_failures += 1
                 continue
-            rows.append(
-                TechnicalShortlistRow(
-                    symbol=discovery.symbol,
-                    discovery_score=discovery.discovery_score,
-                    technical_score=float(output.score),
-                    signal=output.signal.value,
-                    rsi_14=output.metrics.get("rsi_14"),
-                    adx_14=output.metrics.get("adx_14"),
-                    rvol_20=output.metrics.get("rvol_20"),
-                    pattern=output.metrics.get("pattern_detected"),
-                    pattern_quality=output.metrics.get("pattern_quality"),
-                    pit_safe=bool(output.metrics.get("pit_safe", False)),
-                    discovery_reasons=discovery.reasons,
-                    technical_risks=list(output.risks_identified or []),
-                )
-            )
+            rows.append(TechnicalShortlistRow(
+                symbol=discovery.symbol,
+                discovery_score=discovery.discovery_score,
+                technical_score=float(output.score),
+                signal=output.signal.value,
+                rsi_14=output.metrics.get("rsi_14"),
+                adx_14=output.metrics.get("adx_14"),
+                rvol_20=output.metrics.get("rvol_20"),
+                pattern=output.metrics.get("pattern_detected"),
+                pattern_quality=output.metrics.get("pattern_quality"),
+                pit_safe=bool(output.metrics.get("pit_safe", False)),
+                discovery_reasons=discovery.reasons,
+                technical_risks=list(output.risks_identified or []),
+            ))
 
     rows.sort(key=lambda r: (-r.technical_score, -(r.discovery_score or 0.0), r.symbol))
     shortlist = rows[: max(1, shortlist_size)]
+    listing_dicts = [row.to_dict() for row in listing_rows]
 
     summary = SwingScanSummary(
         as_of_date=as_of_date.isoformat(),
@@ -161,8 +128,10 @@ def run(
         technical_success_count=len(rows),
         technical_failure_count=technical_failures,
         shortlist_count=len(shortlist),
-        ipo_opportunity_count=len(ipo_rows),
-        ipo_shortlist=[row.to_dict() for row in ipo_rows],
+        recent_listing_count=len(listing_rows),
+        recent_listing_shortlist=listing_dicts,
+        ipo_opportunity_count=0,
+        ipo_shortlist=[],
         historical_diagnostics=diagnostics,
     )
     return summary, shortlist
