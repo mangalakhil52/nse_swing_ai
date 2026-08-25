@@ -27,10 +27,11 @@ def test_recent_listing_is_detected_without_long_history():
     assert row.symbol == "NEWCO"
     assert row.listing_age_days < 180
     assert row.bars == 20
-    assert row.track == "RECENT_IPO"
+    assert row.track == "RECENT_LISTING"
+    assert row.listing_type == "UNKNOWN"
 
 
-def test_old_first_bar_is_not_treated_as_recent_ipo():
+def test_old_first_bar_is_not_treated_as_recent_listing():
     radar = RecentIPORadar(date(2026, 8, 24), max_age_days=180, min_bars=10)
     assert radar.evaluate("OLDCO", _df(start=date(2025, 1, 1), n=25)) is None
 
@@ -42,7 +43,7 @@ def test_short_history_can_be_radar_candidate_even_when_normal_screen_would_reje
     assert row.bars < 50
 
 
-def test_data_gap_does_not_create_false_ipo_signal():
+def test_data_gap_does_not_create_false_listing_signal():
     df = _df(start=date(2026, 6, 1), n=20)
     df.loc[10:, "timestamp"] = pd.to_datetime(df.loc[10:, "timestamp"]) + pd.Timedelta(days=20)
     radar = RecentIPORadar(date(2026, 8, 24), max_age_days=180, min_bars=10, min_turnover_crores=0.5)
