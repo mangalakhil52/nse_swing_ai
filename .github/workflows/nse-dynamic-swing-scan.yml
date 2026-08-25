@@ -1,0 +1,72 @@
+name: NSE Dynamic Swing Scan
+
+on:
+  workflow_dispatch:
+    inputs:
+      as_of:
+        description: 'Trading date (YYYY-MM-DD)'
+        required: false
+        default: ''
+        type: string
+      lookback:
+        description: 'Historical calendar-day lookback'
+        required: false
+        default: '260'
+        type: string
+      workers:
+        description: 'Concurrent technical-analysis workers'
+        required: false
+        default: '8'
+        type: string
+      shortlist:
+        description: 'Number of technical candidates to retain'
+        required: false
+        default: '50'
+        type: string
+  schedule:
+    - cron: '0 11 * * 1-5'
+
+permissions:
+  contents: read
+
+jobs:
+  dynamic-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Resolve screening date
+        id: params
+        shell: bash
+        run: |
+          AS_OF='${{ inputs.as_of }}'
+          if [ -z "$AS_OF" ]; then
+            AS_OF=$(date -u +%F)
+          fi
+          echo "as_of=$AS_OF" >> "$GITHUB_OUTPUT"
+
+      - name: Run dynamic whole-NSE swing scan
+        run: |
+          python -m src.runtime.nse_swing_scan_cli \
+            --as-of '${{ steps.params.outputs.as_of }}' \
+            --lookback '${{ inputs.lookback || '260' }}' \
+            --workers '${{ inputs.workers || '8' }}' \
+            --shortlist '${{ inputs.shortlist || '50' }}' | tee nse_dynamic_swing_scan.json
+
+      - name: Publish scan result
+        uses: actions/upload-artifact@v4
+        with:
+          name: nse-dynamic-swing-scan-${{ steps.params.outputs.as_of }}
+          path: nse_dynamic_swing_scan.json
+          if-no-files-found: error
