@@ -41,9 +41,13 @@ def run(as_of_date: date, lookback_calendar_days: int = 140, max_workers: int = 
     config = CandidateDiscoveryConfig()
 
     def screen(item):
-        df = market_data.get(item.symbol, pd.DataFrame())
+        # CandidateDiscovery accepts plain symbol strings for LIVE screening.
+        # Passing UniverseSymbol objects here would stringify the whole object
+        # (e.g. "UniverseSymbol(symbol='ACC', ...)") and miss market_data keys.
+        symbol = item.symbol
+        df = market_data.get(symbol, pd.DataFrame())
         return CandidateDiscoveryEngine.discover_candidates(
-            universe=[item], as_of_date=as_of_date, market_data_map={item.symbol: df}, config=config
+            universe=[symbol], as_of_date=as_of_date, market_data_map={symbol: df}, config=config, mode="LIVE"
         )[0]
 
     results = []
@@ -56,8 +60,6 @@ def run(as_of_date: date, lookback_calendar_days: int = 140, max_workers: int = 
             except Exception:
                 errors += 1
 
-    # Availability is determined from the requested universe symbols, not from
-    # CandidateDiscoveryResult.symbol, whose domain type may be UniverseSymbol.
     available_symbols = set(market_data)
     data_available = sum(item.symbol in available_symbols for item in universe)
     eligible = sum(bool(r.eligible) for r in results)
