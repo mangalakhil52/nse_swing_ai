@@ -14,6 +14,7 @@ expensive multi-source CIO pipeline; the shortlist is the input to that stage.
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import date
 
@@ -103,17 +104,14 @@ def run(
     eligible = [r for r in discovery_results if r.eligible and r.pit_safe]
 
     # The technical agent is async but performs CPU-bound pandas calculations.
-    # Run each candidate in a worker thread so --workers actually controls
-    # parallelism after Stage 1 has reduced the universe.
+    # Run each candidate in a worker thread so --workers controls parallelism.
     def analyze_sync(result):
         df = market_data.get(result.symbol, pd.DataFrame())
         return result, asyncio.run(_analyze_technical(result.symbol, df, as_of_date))
 
     rows: list[TechnicalShortlistRow] = []
     technical_failures = 0
-    with __import__("concurrent.futures", fromlist=["ThreadPoolExecutor"]).ThreadPoolExecutor(
-        max_workers=max(1, max_workers)
-    ) as pool:
+    with ThreadPoolExecutor(max_workers=max(1, max_workers)) as pool:
         futures = [pool.submit(analyze_sync, result) for result in eligible]
         for future in futures:
             try:
