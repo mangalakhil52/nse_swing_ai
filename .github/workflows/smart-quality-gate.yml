@@ -34,9 +34,14 @@ jobs:
         with:
           python-version: '3.11'
           cache: pip
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Install project and dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
       - name: Run full test suite
+        env:
+          PYTHONPATH: ${{ github.workspace }}
         run: pytest -q
 
   market-scan:
@@ -53,8 +58,11 @@ jobs:
         with:
           python-version: '3.11'
           cache: pip
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      - name: Install project and dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install -e .
       - name: Resolve screening date
         id: date
         shell: bash
@@ -67,6 +75,8 @@ jobs:
           print(f"as_of={d.isoformat()}")
           PY
       - name: Run dynamic whole-NSE swing scan
+        env:
+          PYTHONPATH: ${{ github.workspace }}
         run: |
           python -m src.runtime.nse_swing_scan_cli \
             --as-of '${{ steps.date.outputs.as_of }}' \
@@ -74,6 +84,8 @@ jobs:
             --workers 4 \
             --shortlist 50 | tee nse_dynamic_swing_scan.json
       - name: Run smart quality gate
+        env:
+          PYTHONPATH: ${{ github.workspace }}
         run: python scripts/validate_scan.py nse_dynamic_swing_scan.json
       - name: Publish scan artifacts
         if: always()
