@@ -13,6 +13,13 @@ def _zip(day, symbol="TRENT", close=100):
     return buf.getvalue()
 
 
+def _legacy_zip(day, symbol="TRENT", close=100):
+    csv = pd.DataFrame({"SYMBOL":[symbol],"SERIES":["EQ"],"TIMESTAMP":[day.strftime("%d-%b-%Y")],"OPEN":[99],"HIGH":[101],"LOW":[98],"CLOSE":[close],"TOTTRDQTY":[10000]}).to_csv(index=False).encode()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z: z.writestr("cm_bhav.csv", csv)
+    return buf.getvalue()
+
+
 def test_historical_source_builds_multi_day_history_and_caches():
     calls = []
     def fetch(day):
@@ -59,3 +66,24 @@ def test_future_rows_are_excluded():
         pass
     else:
         raise AssertionError("future-only data must fail closed")
+
+
+def test_pre_udiff_date_uses_legacy_archive_path_and_parser():
+    source = NSEHistoricalOHLCVSource(date(2024, 7, 5))
+    payload = _legacy_zip(date(2024, 7, 5), close=123)
+    captured = {}
+    source._download_url = lambda url, day: captured.setdefault("url", url) or payload
+    out = source._download(date(2024, 7, 5))
+    parsed = source._parse(out, date(2024, 7, 5))
+    assert "/content/historical/EQUITIES/2024/JUL/" in captured["url"]
+    assert "cm05JUL2024bhav.csv.zip" in captured["url"]
+    assert parsed["close"].tolist() == [123]
+
+
+def test_udiff_cutover_date_uses_modern_archive_path():
+    source = NSEHistoricalOHLCVSource(date(2024, 7, 8))
+    captured = {}
+    source._download_report_api = lambda day: (_ for _ in ()).throw(FileNotFoundError(str(day)))
+    source._download_url = lambda url, day: captured.setdefault("url", url) or _zip(day, close=123)
+    source._download(date(2024, 7, 8))
+    assert "/content/cm/BhavCopy_NSE_CM_0_0_0_20240708_F_0000.csv.zip" in captured["url"]
