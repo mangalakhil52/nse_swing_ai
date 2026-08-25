@@ -1,0 +1,62 @@
+name: Walk-Forward OOS Validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      data_dir:
+        description: 'Directory containing point-in-time symbol CSVs'
+        required: true
+        default: 'data/oos'
+      train_days:
+        description: 'Training trading days'
+        required: true
+        default: '504'
+      validation_days:
+        description: 'Validation trading days'
+        required: true
+        default: '126'
+      test_days:
+        description: 'OOS test trading days'
+        required: true
+        default: '126'
+      step_days:
+        description: 'Walk-forward step in trading days'
+        required: true
+        default: '126'
+
+jobs:
+  oos-validation:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run strict OOS validation
+        env:
+          OOS_DATA_DIR: ${{ inputs.data_dir }}
+        run: |
+          python scripts/run_oos_validation.py \
+            --data-dir "$OOS_DATA_DIR" \
+            --train-days "${{ inputs.train_days }}" \
+            --validation-days "${{ inputs.validation_days }}" \
+            --test-days "${{ inputs.test_days }}" \
+            --step-days "${{ inputs.step_days }}" \
+            --output artifacts/oos_validation.json
+
+      - name: Upload OOS report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oos-validation-report
+          path: artifacts/oos_validation.json
+          if-no-files-found: warn
