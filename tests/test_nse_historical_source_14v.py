@@ -27,6 +27,28 @@ def test_historical_source_builds_multi_day_history_and_caches():
     assert len(calls) == 2
 
 
+def test_bulk_fetch_downloads_each_day_once_for_many_symbols():
+    calls = []
+    def fetch(day):
+        calls.append(day)
+        first = _zip(day, "TRENT", 101)
+        second = _zip(day, "INFY", 201)
+        with zipfile.ZipFile(io.BytesIO(first)) as z1, zipfile.ZipFile(io.BytesIO(second)) as z2:
+            frames = []
+            for z in (z1, z2):
+                frames.append(pd.read_csv(z.open("bhav.csv")))
+        csv = pd.concat(frames, ignore_index=True).to_csv(index=False).encode()
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z: z.writestr("bhav.csv", csv)
+        return buf.getvalue()
+    source = NSEHistoricalOHLCVSource(date(2026, 6, 30), lookback_calendar_days=2, fetcher=fetch)
+    out = source.fetch_many(["TRENT", "INFY"])
+    assert set(out) == {"TRENT", "INFY"}
+    assert len(calls) == 2
+    assert source.diagnostics.successful_days == 2
+    assert source.diagnostics.matching_days == 2
+
+
 def test_future_rows_are_excluded():
     def fetch(day):
         return _zip(date(2026, 7, 1), close=999)
