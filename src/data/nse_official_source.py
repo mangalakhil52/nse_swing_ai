@@ -32,6 +32,13 @@ class _UrlopenResponse:
 requests = _RequestsCompat()
 
 
+def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Normalize harmless CSV header formatting differences from NSE exports."""
+    out = df.copy()
+    out.columns = [str(c).replace("\ufeff", "").strip().upper() for c in out.columns]
+    return out
+
+
 class NSEOfficialUniverseSource:
     URL = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
 
@@ -44,7 +51,7 @@ class NSEOfficialUniverseSource:
             session.headers.update(headers)
             response = session.get(self.URL, timeout=self.timeout_seconds)
             response.raise_for_status()
-        df = pd.read_csv(io.BytesIO(response.content))
+        df = _normalize_columns(pd.read_csv(io.BytesIO(response.content)))
         required = {"SYMBOL", "SERIES"}
         if not required.issubset(df.columns):
             raise ValueError(f"NSE equity master missing columns: {sorted(required - set(df.columns))}")
@@ -88,17 +95,18 @@ class NSEOfficialBhavcopySource:
                 raise ValueError("NSE bhavcopy ZIP contains no CSV")
             with archive.open(csv_names[0]) as handle:
                 raw = pd.read_csv(handle)
-        required = {"TckrSymb", "TradDt", "OpnPric", "HghPric", "LwPric", "ClsPric", "TtlTradgVol"}
+        raw = _normalize_columns(raw)
+        required = {"TCKRSYMB", "TRADDT", "OPNPRIC", "HGHPric".upper(), "LWPRIC", "CLSPRIC", "TTLTRADGVOL"}
         if not required.issubset(raw.columns):
             raise ValueError(f"NSE UDiFF bhavcopy missing columns: {sorted(required - set(raw.columns))}")
         out = pd.DataFrame({
-            "symbol": raw["TckrSymb"].astype(str).str.strip().str.upper(),
-            "timestamp": pd.to_datetime(raw["TradDt"], errors="coerce"),
-            "open": pd.to_numeric(raw["OpnPric"], errors="coerce"),
-            "high": pd.to_numeric(raw["HghPric"], errors="coerce"),
-            "low": pd.to_numeric(raw["LwPric"], errors="coerce"),
-            "close": pd.to_numeric(raw["ClsPric"], errors="coerce"),
-            "volume": pd.to_numeric(raw["TtlTradgVol"], errors="coerce"),
+            "symbol": raw["TCKRSYMB"].astype(str).str.strip().str.upper(),
+            "timestamp": pd.to_datetime(raw["TRADDT"], errors="coerce"),
+            "open": pd.to_numeric(raw["OPNPRIC"], errors="coerce"),
+            "high": pd.to_numeric(raw["HGHPric".upper()], errors="coerce"),
+            "low": pd.to_numeric(raw["LWPRIC"], errors="coerce"),
+            "close": pd.to_numeric(raw["CLSPRIC"], errors="coerce"),
+            "volume": pd.to_numeric(raw["TTLTRADGVOL"], errors="coerce"),
         }).dropna()
         out = out[out["timestamp"].dt.date <= self.as_of_date]
         if out.empty:
