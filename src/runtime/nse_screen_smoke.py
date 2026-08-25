@@ -5,12 +5,12 @@ stops before CIO/AI analysis so data coverage can be validated independently.
 """
 from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from datetime import date
 from src.data.nse_official_source import NSEOfficialUniverseSource
 from src.data.nse_historical_source import NSEHistoricalOHLCVSource
 from src.data.market_universe import MarketUniverseService
-from src.core.candidate_discovery import CandidateDiscoveryEngine, CandidateDiscoveryConfig
+from src.candidate_discovery import CandidateDiscoveryEngine, CandidateDiscoveryConfig
 
 
 @dataclass
@@ -32,8 +32,7 @@ def run(as_of_date: date, lookback_calendar_days: int = 140, max_workers: int = 
         universe = universe[:limit]
     source = NSEHistoricalOHLCVSource(as_of_date, lookback_calendar_days=lookback_calendar_days)
     config = CandidateDiscoveryConfig()
-    results = []
-    errors = 0
+    results, errors = [], 0
 
     def screen(item):
         try:
@@ -41,7 +40,7 @@ def run(as_of_date: date, lookback_calendar_days: int = 140, max_workers: int = 
             return CandidateDiscoveryEngine.discover_candidates(
                 universe=[item], as_of_date=as_of_date, market_data_map={item.symbol: df}, config=config
             )[0]
-        except Exception as exc:  # isolated per-symbol failure
+        except Exception as exc:
             return exc
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
