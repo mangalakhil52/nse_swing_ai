@@ -1,8 +1,4 @@
-"""Historical NSE daily OHLCV acquisition from official UDiFF bhavcopies.
-
-Downloads only the requested date range, caches each trading-day archive in
-memory, and exposes per-symbol history suitable for PIT-safe screening.
-"""
+"""Historical NSE daily OHLCV acquisition from official UDiFF bhavcopies."""
 from __future__ import annotations
 import io
 import zipfile
@@ -23,22 +19,18 @@ class NSEHistoricalOHLCVSource:
         self._cache: dict[date, pd.DataFrame] = {}
 
     @staticmethod
-    def _normalize_columns(columns) -> dict:
-        """Normalize NSE headers while retaining the canonical UDiFF names."""
+    def _normalize_columns(columns) -> dict[str, str]:
+        """Map normalized live NSE headers to canonical UDiFF field names."""
         normalized = {}
         for col in columns:
-            key = str(col).replace("\ufeff", "").strip()
-            normalized[key.lower()] = col
+            key = str(col).replace("\ufeff", "").strip().lower()
+            normalized[key] = col
         aliases = {
-            "tckrsymb": "TckrSymb",
-            "traddt": "TradDt",
-            "opnpric": "OpnPric",
-            "hghpric": "HghPric",
-            "lwpric": "LwPric",
-            "clspric": "ClsPric",
+            "tckrsymb": "TckrSymb", "traddt": "TradDt", "opnpric": "OpnPric",
+            "hghpric": "HghPric", "lwpric": "LwPric", "clspric": "ClsPric",
             "ttltradgvol": "TtlTradgVol",
         }
-        return {canonical: normalized[canonical.lower()] for canonical in aliases if canonical.lower() in normalized}
+        return {canonical: normalized[source_key] for source_key, canonical in aliases.items() if source_key in normalized}
 
     def fetch(self, symbol: str) -> pd.DataFrame:
         start = self.as_of_date - timedelta(days=self.lookback_calendar_days)
@@ -64,17 +56,12 @@ class NSEHistoricalOHLCVSource:
 
     def _day(self, day: date) -> pd.DataFrame:
         if day not in self._cache:
-            raw = self.fetcher(day)
-            self._cache[day] = self._parse(raw, day)
+            self._cache[day] = self._parse(self.fetcher(day), day)
         return self._cache[day]
 
     def _download(self, day: date) -> bytes:
         url = self.URL_TEMPLATE.format(date=day.strftime("%Y%m%d"))
-        req = Request(url, headers={
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36",
-            "Accept": "application/zip,application/octet-stream,*/*",
-            "Referer": "https://www.nseindia.com/",
-        })
+        req = Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/zip,application/octet-stream,*/*", "Referer": "https://www.nseindia.com/"})
         with urlopen(req, timeout=self.timeout_seconds) as response:
             return response.read()
 
