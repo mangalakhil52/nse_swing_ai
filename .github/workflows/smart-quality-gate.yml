@@ -1,0 +1,86 @@
+name: Smart NSE Quality Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      run_full_scan:
+        description: Run the full NSE scan after tests
+        required: false
+        default: true
+        type: boolean
+  schedule:
+    - cron: '30 15 * * 1-5'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: smart-quality-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regression:
+    name: Regression tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run full test suite
+        run: pytest -q
+
+  market-scan:
+    name: Full NSE smart scan
+    needs: regression
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Resolve screening date
+        id: date
+        shell: bash
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          from datetime import date, timedelta
+          d = date.today()
+          while d.weekday() >= 5:
+              d -= timedelta(days=1)
+          print(f"as_of={d.isoformat()}")
+          PY
+      - name: Run dynamic whole-NSE swing scan
+        run: |
+          python -m src.runtime.nse_swing_scan_cli \
+            --as-of '${{ steps.date.outputs.as_of }}' \
+            --lookback 260 \
+            --workers 4 \
+            --shortlist 50 | tee nse_dynamic_swing_scan.json
+      - name: Run smart quality gate
+        run: python scripts/validate_scan.py nse_dynamic_swing_scan.json
+      - name: Publish scan artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smart-nse-scan-${{ steps.date.outputs.as_of }}
+          path: |
+            nse_dynamic_swing_scan.json
+            scan_quality_report.json
+          if-no-files-found: error
