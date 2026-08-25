@@ -1,0 +1,60 @@
+name: NSE Technical Screen
+
+on:
+  workflow_dispatch:
+    inputs:
+      as_of:
+        description: 'Trading date (YYYY-MM-DD)'
+        required: false
+        default: '2026-08-24'
+        type: string
+      limit:
+        description: 'Number of NSE symbols to process'
+        required: false
+        default: '50'
+        type: string
+      workers:
+        description: 'Concurrent technical workers'
+        required: false
+        default: '4'
+        type: string
+      lookback:
+        description: 'Historical calendar-day lookback'
+        required: false
+        default: '140'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  technical-screen:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Stage-2 technical screen
+        run: |
+          python -m src.runtime.nse_technical_screen_cli \
+            --as-of '${{ inputs.as_of }}' \
+            --limit '${{ inputs.limit }}' \
+            --workers '${{ inputs.workers }}' \
+            --lookback '${{ inputs.lookback }}' | tee nse_technical_result.json
+
+      - name: Publish Stage-2 result
+        uses: actions/upload-artifact@v4
+        with:
+          name: nse-technical-screen-${{ inputs.as_of }}
+          path: nse_technical_result.json
+          if-no-files-found: error
