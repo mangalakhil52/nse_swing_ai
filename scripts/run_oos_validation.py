@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Strict walk-forward / out-of-sample validation entry point.
 
-Input is a directory containing one CSV per symbol. CSVs must contain either a
-`timestamp` column or a datetime index plus OHLCV columns required by the
-production portfolio engine. No current/live universe fallback is permitted.
+Input is a directory containing one CSV per symbol. CSVs must contain a
+`timestamp` column plus OHLCV columns required by the production engine.
+No current/live universe fallback is permitted.
 """
 
 import argparse
@@ -32,9 +32,12 @@ def _load_csvs(data_dir: Path) -> dict[str, pd.DataFrame]:
         if "timestamp" not in df.columns:
             raise ValueError(f"{path}: required timestamp column is missing")
         df["timestamp"] = pd.to_datetime(df["timestamp"], errors="raise")
-        df = df.sort_values("timestamp").drop_duplicates("timestamp", keep=False)
+        if df["timestamp"].duplicated().any():
+            raise ValueError(f"{path}: duplicate timestamps detected")
+        df = df.sort_values("timestamp")
         required = {"open", "high", "low", "close", "volume"}
-        missing = required.difference(c.lower() for c in df.columns)
+        actual = {str(c).lower() for c in df.columns}
+        missing = required.difference(actual)
         if missing:
             raise ValueError(f"{path}: missing OHLCV columns: {sorted(missing)}")
         result[symbol] = df
