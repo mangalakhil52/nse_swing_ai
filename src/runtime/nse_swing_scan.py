@@ -14,7 +14,6 @@ expensive multi-source CIO pipeline; the shortlist is the input to that stage.
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import date
 
@@ -60,14 +59,13 @@ async def _analyze_technical(symbol: str, df: pd.DataFrame, as_of: date):
     meta = SymbolMetadata(symbol=symbol, company_name=symbol, exchange="NSE")
     agent = TechnicalAnalysisAgent()
     graph = EvidenceGraph()
-    output = await agent.execute(
+    return await agent.execute(
         meta,
         df,
         graph,
         run_id=f"NSE-SCAN-{as_of.isoformat()}",
         context={"decision_time": as_of},
     )
-    return output
 
 
 def run(
@@ -95,7 +93,6 @@ def run(
     if min_adtv_crores is not None:
         config.min_average_turnover_crores = min_adtv_crores
 
-    # Cheap Stage 1 screening across the complete dynamically fetched universe.
     discovery_results = CandidateDiscoveryEngine.discover_candidates(
         universe=[item.symbol for item in universe],
         as_of_date=as_of_date,
@@ -105,49 +102,44 @@ def run(
     )
     eligible = [r for r in discovery_results if r.eligible and r.pit_safe]
 
-    # Stage 2: existing deterministic technical engine, parallelized only after
-    # the cheap funnel has reduced the universe.
-    async def run_one(result):
+    # The technical agent is async but performs CPU-bound pandas calculations.
+    # Run each candidate in a worker thread so --workers actually controls
+    # parallelism after Stage 1 has reduced the universe.
+    def analyze_sync(result):
         df = market_data.get(result.symbol, pd.DataFrame())
-        return result, await _analyze_technical(result.symbol, df, as_of_date)
+        return result, asyncio.run(_analyze_technical(result.symbol, df, as_of_date))
 
-    async def run_all():
-        sem = asyncio.Semaphore(max(1, max_workers))
-
-        async def bounded(result):
-            async with sem:
-                return await run_one(result)
-
-        return await asyncio.gather(*(bounded(r) for r in eligible), return_exceptions=True)
-
-    paired = asyncio.run(run_all())
     rows: list[TechnicalShortlistRow] = []
     technical_failures = 0
-
-    for item in paired:
-        if isinstance(item, Exception):
-            technical_failures += 1
-            continue
-        discovery, output = item
-        if output.status.value != "SUCCESS":
-            technical_failures += 1
-            continue
-        rows.append(
-            TechnicalShortlistRow(
-                symbol=discovery.symbol,
-                discovery_score=discovery.discovery_score,
-                technical_score=float(output.score),
-                signal=output.signal.value,
-                rsi_14=output.metrics.get("rsi_14"),
-                adx_14=output.metrics.get("adx_14"),
-                rvol_20=output.metrics.get("rvol_20"),
-                pattern=output.metrics.get("pattern_detected"),
-                pattern_quality=output.metrics.get("pattern_quality"),
-                pit_safe=bool(output.metrics.get("pit_safe", False)),
-                discovery_reasons=discovery.reasons,
-                technical_risks=list(output.risks_identified or []),
+    with __import__("concurrent.futures", fromlist=["ThreadPoolExecutor"]).ThreadPoolExecutor(
+        max_workers=max(1, max_workers)
+    ) as pool:
+        futures = [pool.submit(analyze_sync, result) for result in eligible]
+        for future in futures:
+            try:
+                discovery, output = future.result()
+            except Exception:
+                technical_failures += 1
+                continue
+            if output.status.value != "SUCCESS":
+                technical_failures += 1
+                continue
+            rows.append(
+                TechnicalShortlistRow(
+                    symbol=discovery.symbol,
+                    discovery_score=discovery.discovery_score,
+                    technical_score=float(output.score),
+                    signal=output.signal.value,
+                    rsi_14=output.metrics.get("rsi_14"),
+                    adx_14=output.metrics.get("adx_14"),
+                    rvol_20=output.metrics.get("rvol_20"),
+                    pattern=output.metrics.get("pattern_detected"),
+                    pattern_quality=output.metrics.get("pattern_quality"),
+                    pit_safe=bool(output.metrics.get("pit_safe", False)),
+                    discovery_reasons=discovery.reasons,
+                    technical_risks=list(output.risks_identified or []),
+                )
             )
-        )
 
     rows.sort(key=lambda r: (-r.technical_score, -(r.discovery_score or 0.0), r.symbol))
     shortlist = rows[: max(1, shortlist_size)]
