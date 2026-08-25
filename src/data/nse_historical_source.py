@@ -2,9 +2,22 @@
 from __future__ import annotations
 import io
 import zipfile
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from urllib.request import Request, urlopen
 import pandas as pd
+
+
+@dataclass
+class HistoricalFetchDiagnostics:
+    requested_days: int = 0
+    attempted_days: int = 0
+    successful_days: int = 0
+    missing_archives: int = 0
+    download_failures: int = 0
+    parse_failures: int = 0
+    matching_days: int = 0
+    errors: list[str] = field(default_factory=list)
 
 
 class NSEHistoricalOHLCVSource:
@@ -17,37 +30,42 @@ class NSEHistoricalOHLCVSource:
         self.timeout_seconds = timeout_seconds
         self.fetcher = fetcher or self._download
         self._cache: dict[date, pd.DataFrame] = {}
+        self.diagnostics = HistoricalFetchDiagnostics()
 
     @staticmethod
     def _normalize_columns(columns) -> dict[str, str]:
-        """Map normalized live NSE headers to canonical UDiFF field names."""
-        normalized = {}
-        for col in columns:
-            key = str(col).replace("\ufeff", "").strip().lower()
-            normalized[key] = col
-        aliases = {
-            "tckrsymb": "TckrSymb", "traddt": "TradDt", "opnpric": "OpnPric",
-            "hghpric": "HghPric", "lwpric": "LwPric", "clspric": "ClsPric",
-            "ttltradgvol": "TtlTradgVol",
-        }
-        return {canonical: normalized[source_key] for source_key, canonical in aliases.items() if source_key in normalized}
+        normalized = {str(col).replace("\ufeff", "").strip().lower(): col for col in columns}
+        aliases = {"tckrsymb":"TckrSymb", "traddt":"TradDt", "opnpric":"OpnPric", "hghpric":"HghPric", "lwpric":"LwPric", "clspric":"ClsPric", "ttltradgvol":"TtlTradgVol"}
+        return {canonical: normalized[key] for key, canonical in aliases.items() if key in normalized}
 
     def fetch(self, symbol: str) -> pd.DataFrame:
         start = self.as_of_date - timedelta(days=self.lookback_calendar_days)
+        days = (self.as_of_date - start).days + 1
+        self.diagnostics.requested_days = days
         frames = []
         day = start
         while day <= self.as_of_date:
             if day.weekday() < 5:
+                self.diagnostics.attempted_days += 1
                 try:
                     frame = self._day(day)
+                    self.diagnostics.successful_days += 1
                     row = frame[frame["symbol"].eq(symbol.upper())]
                     if not row.empty:
+                        self.diagnostics.matching_days += 1
                         frames.append(row)
-                except (OSError, IOError, ValueError, zipfile.BadZipFile):
-                    pass
+                except FileNotFoundError:
+                    self.diagnostics.missing_archives += 1
+                except (OSError, IOError) as exc:
+                    self.diagnostics.download_failures += 1
+                    self.diagnostics.errors.append(f"{day}: download: {exc}")
+                except (ValueError, zipfile.BadZipFile) as exc:
+                    self.diagnostics.parse_failures += 1
+                    self.diagnostics.errors.append(f"{day}: parse: {exc}")
             day += timedelta(days=1)
         if not frames:
-            raise ValueError(f"No historical NSE OHLCV found for {symbol} through {self.as_of_date}")
+            detail = "; ".join(self.diagnostics.errors[-3:])
+            raise ValueError(f"No historical NSE OHLCV found for {symbol} through {self.as_of_date}; diagnostics={self.diagnostics}{(' errors='+detail) if detail else ''}")
         out = pd.concat(frames, ignore_index=True).sort_values("timestamp")
         out = out[out["timestamp"].dt.date <= self.as_of_date]
         if out.empty:
@@ -61,7 +79,7 @@ class NSEHistoricalOHLCVSource:
 
     def _download(self, day: date) -> bytes:
         url = self.URL_TEMPLATE.format(date=day.strftime("%Y%m%d"))
-        req = Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/zip,application/octet-stream,*/*", "Referer": "https://www.nseindia.com/"})
+        req = Request(url, headers={"User-Agent":"Mozilla/5.0", "Accept":"application/zip,application/octet-stream,*/*", "Referer":"https://www.nseindia.com/"})
         with urlopen(req, timeout=self.timeout_seconds) as response:
             return response.read()
 
@@ -76,12 +94,4 @@ class NSEHistoricalOHLCVSource:
         missing = self.REQUIRED - set(mapping)
         if missing:
             raise ValueError(f"NSE bhavcopy missing columns: {sorted(missing)}; received={list(raw.columns)}")
-        return pd.DataFrame({
-            "symbol": raw[mapping["TckrSymb"]].astype(str).str.strip().str.upper(),
-            "timestamp": pd.to_datetime(raw[mapping["TradDt"]], errors="coerce"),
-            "open": pd.to_numeric(raw[mapping["OpnPric"]], errors="coerce"),
-            "high": pd.to_numeric(raw[mapping["HghPric"]], errors="coerce"),
-            "low": pd.to_numeric(raw[mapping["LwPric"]], errors="coerce"),
-            "close": pd.to_numeric(raw[mapping["ClsPric"]], errors="coerce"),
-            "volume": pd.to_numeric(raw[mapping["TtlTradgVol"]], errors="coerce"),
-        }).dropna()
+        return pd.DataFrame({"symbol":raw[mapping["TckrSymb"]].astype(str).str.strip().str.upper(),"timestamp":pd.to_datetime(raw[mapping["TradDt"]],errors="coerce"),"open":pd.to_numeric(raw[mapping["OpnPric"]],errors="coerce"),"high":pd.to_numeric(raw[mapping["HghPric"]],errors="coerce"),"low":pd.to_numeric(raw[mapping["LwPric"]],errors="coerce"),"close":pd.to_numeric(raw[mapping["ClsPric"]],errors="coerce"),"volume":pd.to_numeric(raw[mapping["TtlTradgVol"]],errors="coerce")}).dropna()
