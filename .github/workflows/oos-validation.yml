@@ -3,10 +3,14 @@ name: Walk-Forward OOS Validation
 on:
   workflow_dispatch:
     inputs:
-      data_dir:
-        description: 'Directory containing point-in-time symbol CSVs'
+      start_date:
+        description: 'Historical start date (YYYY-MM-DD)'
         required: true
-        default: 'data/oos'
+        default: '2023-08-01'
+      end_date:
+        description: 'Historical end date (YYYY-MM-DD)'
+        required: true
+        default: '2026-08-24'
       train_days:
         description: 'Training trading days'
         required: true
@@ -23,12 +27,18 @@ on:
         description: 'Walk-forward step in trading days'
         required: true
         default: '126'
+      prepare_data:
+        description: 'Download official NSE historical bhavcopies and build OOS dataset'
+        required: true
+        default: 'true'
+        type: boolean
 
 jobs:
   oos-validation:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    timeout-minutes: 180
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,12 +51,32 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Build survivorship-safe NSE OOS dataset
+        if: ${{ inputs.prepare_data }}
+        run: |
+          python scripts/build_oos_dataset.py \
+            --start "${{ inputs.start_date }}" \
+            --end "${{ inputs.end_date }}" \
+            --output artifacts/oos_data
+
+      - name: Validate prepared dataset
+        run: |
+          test -f artifacts/oos_data/_manifest.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          m = json.loads(Path('artifacts/oos_data/_manifest.json').read_text())
+          print(json.dumps(m, indent=2))
+          if m['successful_days'] <= 0 or m['symbols'] <= 0:
+              raise SystemExit('OOS dataset preparation produced no usable history')
+          if m['failed_days'] > max(5, int(m['attempted_days'] * 0.02)):
+              raise SystemExit(f"Too many failed historical days: {m['failed_days']}/{m['attempted_days']}")
+          PY
+
       - name: Run strict OOS validation
-        env:
-          OOS_DATA_DIR: ${{ inputs.data_dir }}
         run: |
           python scripts/run_oos_validation.py \
-            --data-dir "$OOS_DATA_DIR" \
+            --data-dir artifacts/oos_data \
             --train-days "${{ inputs.train_days }}" \
             --validation-days "${{ inputs.validation_days }}" \
             --test-days "${{ inputs.test_days }}" \
@@ -59,4 +89,12 @@ jobs:
         with:
           name: oos-validation-report
           path: artifacts/oos_validation.json
+          if-no-files-found: warn
+
+      - name: Upload dataset diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oos-dataset-diagnostics
+          path: artifacts/oos_data/_manifest.json
           if-no-files-found: warn
