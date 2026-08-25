@@ -19,11 +19,17 @@ def _df(symbol="AAA"):
     })
 
 
+class _Hist:
+    async def get_daily_ohlcv(self, *args, **kwargs):
+        return _df("NIFTY 50")
+
+    async def close(self):
+        return None
+
+
 def test_deep_scan_is_gated_by_market_regime():
     technical = [SimpleNamespace(symbol="AAA")]
-    swing = SimpleNamespace(
-        historical_diagnostics={},
-    )
+    swing = SimpleNamespace(historical_diagnostics={})
     universe = [{"symbol": "AAA", "exchange": "NSE"}]
     regime = SimpleNamespace(
         allow_long_swing_trades=False,
@@ -33,6 +39,7 @@ def test_deep_scan_is_gated_by_market_regime():
     with patch("src.runtime.nse_deep_scan.run_swing_scan", return_value=(swing, technical)), \
          patch("src.runtime.nse_deep_scan.NSEOfficialUniverseSource.fetch", return_value=universe), \
          patch("src.runtime.nse_deep_scan.NSEHistoricalOHLCVSource.fetch_many", return_value={"AAA": _df()}), \
+         patch("src.runtime.nse_deep_scan.HistoricalDataProvider", return_value=_Hist()), \
          patch("src.runtime.nse_deep_scan.MarketRegimeClassifier.classify_regime", return_value=regime):
         summary, recs = run(date(2026, 8, 24))
 
@@ -57,6 +64,7 @@ def test_deep_scan_only_sends_shortlist_to_cio():
     with patch("src.runtime.nse_deep_scan.run_swing_scan", return_value=(swing, technical)), \
          patch("src.runtime.nse_deep_scan.NSEOfficialUniverseSource.fetch", return_value=universe), \
          patch("src.runtime.nse_deep_scan.NSEHistoricalOHLCVSource.fetch_many", return_value={"AAA": _df()}), \
+         patch("src.runtime.nse_deep_scan.HistoricalDataProvider", return_value=_Hist()), \
          patch("src.runtime.nse_deep_scan.MarketRegimeClassifier.classify_regime", return_value=regime), \
          patch("src.runtime.nse_deep_scan.QuantScreener.screen_single_stock", return_value=SimpleNamespace(symbol="AAA")), \
          patch("src.runtime.nse_deep_scan._run_cio", return_value=[fake_rec]) as cio:
