@@ -1,8 +1,4 @@
-"""#14W controlled NSE market-data screening smoke runner.
-
-Runs universe + historical OHLCV + Candidate Discovery only. It deliberately
-stops before CIO/AI analysis so data coverage can be validated independently.
-"""
+"""#14W controlled NSE market-data screening smoke runner."""
 from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -32,13 +28,14 @@ def run(as_of_date: date, lookback_calendar_days: int = 140, max_workers: int = 
         universe = universe[:limit]
     source = NSEHistoricalOHLCVSource(as_of_date, lookback_calendar_days=lookback_calendar_days)
     config = CandidateDiscoveryConfig()
-    results, errors = [], 0
+    results = []
+    errors = 0
 
     def screen(item):
         try:
             df = source.fetch(item.symbol)
             return CandidateDiscoveryEngine.discover_candidates(
-                universe=[item], as_of_date=as_of_date, market_data_map={item.symbol: df}, config=config
+                universe=[item], as_of_date=as_of_date, market_data_map={item.symbol: df], config=config
             )[0]
         except Exception as exc:
             return exc
@@ -59,4 +56,4 @@ def run(as_of_date: date, lookback_calendar_days: int = 140, max_workers: int = 
         data_available=data_available, data_unavailable=len(universe) - data_available,
         eligible=eligible, ineligible=len(results) - eligible, errors=errors,
     )
-    return summary, sorted(results, key=lambda r: (-r.discovery_score, r.symbol))
+    return summary, sorted(results, key=lambda r: (-(r.discovery_score if r.discovery_score is not None else float("-inf")), r.symbol))
