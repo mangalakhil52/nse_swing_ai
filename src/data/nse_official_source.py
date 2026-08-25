@@ -7,10 +7,29 @@ from urllib.request import Request, urlopen
 import pandas as pd
 
 
-def _get(url: str, timeout: float) -> bytes:
-    req = Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "*/*"})
-    with urlopen(req, timeout=timeout) as response:
-        return response.read()
+class _RequestsCompat:
+    """Small compatibility surface retained for existing tests/mocks."""
+    class Session:
+        def __init__(self):
+            self.headers = {}
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+        def get(self, url, timeout=None):
+            req = Request(url, headers=self.headers)
+            return _UrlopenResponse(urlopen(req, timeout=timeout))
+
+
+class _UrlopenResponse:
+    def __init__(self, response):
+        self._response = response
+        self.content = response.read()
+    def raise_for_status(self):
+        return None
+
+
+requests = _RequestsCompat()
 
 
 class NSEOfficialUniverseSource:
@@ -20,7 +39,12 @@ class NSEOfficialUniverseSource:
         self.timeout_seconds = timeout_seconds
 
     def fetch(self) -> list[dict]:
-        df = pd.read_csv(io.BytesIO(_get(self.URL, self.timeout_seconds)))
+        headers = {"User-Agent": "Mozilla/5.0", "Accept": "text/csv,application/octet-stream"}
+        with requests.Session() as session:
+            session.headers.update(headers)
+            response = session.get(self.URL, timeout=self.timeout_seconds)
+            response.raise_for_status()
+        df = pd.read_csv(io.BytesIO(response.content))
         required = {"SYMBOL", "SERIES"}
         if not required.issubset(df.columns):
             raise ValueError(f"NSE equity master missing columns: {sorted(required - set(df.columns))}")
@@ -53,8 +77,12 @@ class NSEOfficialBhavcopySource:
 
     def _download_frame(self) -> pd.DataFrame:
         url = self.URL_TEMPLATE.format(date=self.as_of_date.strftime("%Y%m%d"))
-        raw_bytes = _get(url, self.timeout_seconds)
-        with zipfile.ZipFile(io.BytesIO(raw_bytes)) as archive:
+        headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/zip,application/octet-stream"}
+        with requests.Session() as session:
+            session.headers.update(headers)
+            response = session.get(url, timeout=self.timeout_seconds)
+            response.raise_for_status()
+        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
             csv_names = [n for n in archive.namelist() if n.lower().endswith(".csv")]
             if not csv_names:
                 raise ValueError("NSE bhavcopy ZIP contains no CSV")
