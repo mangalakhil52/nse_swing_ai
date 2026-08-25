@@ -21,10 +21,17 @@ from datetime import date
 
 
 def _make_bullish_df(n: int = 80) -> pd.DataFrame:
-    close = np.linspace(100, 180, n)
+    # Construct a realistic bullish trend with a final EMA20 rejection/reversal.
+    # The old fixture was perfectly monotonic, which forced RSI to 100 and no longer
+    # represented a healthy swing setup under the continuous scoring model.
+    close = np.linspace(100, 178, n)
+    close[-1] = 170.0
     high = close + 2.0
     low = close - 2.0
     open_p = close - 1.0
+    high[-1] = 172.0
+    low[-1] = 165.0
+    open_p[-1] = 167.0
     volume = np.full(n, 800000)
     turnover = (close * volume) / 1e7
     df = pd.DataFrame({
