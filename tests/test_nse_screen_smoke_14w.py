@@ -16,17 +16,20 @@ def _df(symbol):
 def test_screen_smoke_stops_at_candidate_discovery():
     raw = [{"symbol": "AAA", "exchange": "NSE"}, {"symbol": "BBB", "exchange": "NSE"}]
     with patch("src.runtime.nse_screen_smoke.NSEOfficialUniverseSource.fetch", return_value=raw), \
-         patch("src.runtime.nse_screen_smoke.NSEHistoricalOHLCVSource.fetch", side_effect=lambda s: _df(s)):
+         patch("src.runtime.nse_screen_smoke.NSEHistoricalOHLCVSource.fetch_many", return_value={"AAA": _df("AAA"), "BBB": _df("BBB")}):
         summary, results = run(date(2026, 6, 30), max_workers=2)
     assert summary.universe_count == 2
     assert summary.errors == 0
+    assert summary.data_available == 2
     assert len(results) == 2
+    assert "historical_diagnostics" in summary.__dict__
 
 
 def test_screen_smoke_supports_controlled_limit():
     raw = [{"symbol": "AAA", "exchange": "NSE"}, {"symbol": "BBB", "exchange": "NSE"}]
     with patch("src.runtime.nse_screen_smoke.NSEOfficialUniverseSource.fetch", return_value=raw), \
-         patch("src.runtime.nse_screen_smoke.NSEHistoricalOHLCVSource.fetch", side_effect=lambda s: _df(s)):
+         patch("src.runtime.nse_screen_smoke.NSEHistoricalOHLCVSource.fetch_many", return_value={"AAA": _df("AAA")}):
         summary, _ = run(date(2026, 6, 30), limit=1)
     assert summary.universe_count == 2
     assert summary.normalized_count == 1
+    assert summary.data_available == 1
