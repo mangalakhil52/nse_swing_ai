@@ -72,7 +72,12 @@ def test_pre_udiff_date_uses_legacy_archive_path_and_parser():
     source = NSEHistoricalOHLCVSource(date(2024, 7, 5))
     payload = _legacy_zip(date(2024, 7, 5), close=123)
     captured = {}
-    source._download_url = lambda url, day: captured.setdefault("url", url) or payload
+
+    def download(url, day):
+        captured["url"] = url
+        return payload
+
+    source._download_url = download
     out = source._download(date(2024, 7, 5))
     parsed = source._parse(out, date(2024, 7, 5))
     assert "/content/historical/EQUITIES/2024/JUL/" in captured["url"]
@@ -84,6 +89,11 @@ def test_udiff_cutover_date_uses_modern_archive_path():
     source = NSEHistoricalOHLCVSource(date(2024, 7, 8))
     captured = {}
     source._download_report_api = lambda day: (_ for _ in ()).throw(FileNotFoundError(str(day)))
-    source._download_url = lambda url, day: captured.setdefault("url", url) or _zip(day, close=123)
+
+    def download(url, day):
+        captured["url"] = url
+        return _zip(day, close=123)
+
+    source._download_url = download
     source._download(date(2024, 7, 8))
     assert "/content/cm/BhavCopy_NSE_CM_0_0_0_20240708_F_0000.csv.zip" in captured["url"]
