@@ -15,7 +15,7 @@ def _df():
         "high": close.values + 1,
         "low": close.values - 2,
         "close": close.values,
-        "volume": [2_000_000.0] * len(idx),
+        "volume": [10_000_000.0] * len(idx),
     })
 
 
