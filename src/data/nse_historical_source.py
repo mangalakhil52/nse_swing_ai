@@ -34,14 +34,14 @@ class NSEHistoricalOHLCVSource:
                     if not row.empty:
                         frames.append(row)
                 except (OSError, IOError, ValueError, zipfile.BadZipFile):
-                    # Missing archive can be a weekend/holiday or an unavailable date;
-                    # continue so one missing day does not destroy the history window.
                     pass
             day += timedelta(days=1)
         if not frames:
             raise ValueError(f"No historical NSE OHLCV found for {symbol} through {self.as_of_date}")
         out = pd.concat(frames, ignore_index=True).sort_values("timestamp")
         out = out[out["timestamp"].dt.date <= self.as_of_date]
+        if out.empty:
+            raise ValueError(f"No point-in-time NSE OHLCV found for {symbol} through {self.as_of_date}")
         return out[["timestamp", "open", "high", "low", "close", "volume"]].drop_duplicates("timestamp").reset_index(drop=True)
 
     def _day(self, day: date) -> pd.DataFrame:
