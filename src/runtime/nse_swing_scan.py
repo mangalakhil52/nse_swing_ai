@@ -6,10 +6,14 @@ Pipeline:
   3. Run the cheap Candidate Discovery filters across the whole universe.
   4. Run the existing deterministic Technical Analysis specialist on every
      eligible candidate.
-  5. Rank candidates by technical score and return the shortlist.
+  5. Run a separate conservative Recent IPO radar so short-history listings
+     are not systematically excluded by the normal long-history funnel.
+  6. Rank the regular candidates by technical score.
 
-No stock symbols are hardcoded. This module intentionally stops before the
-expensive multi-source CIO pipeline; the shortlist is the input to that stage.
+The IPO track is intentionally separate: it never weakens the normal screen and
+never fabricates a listing date. Its inferred listing date is based on the first
+observed bar inside the lookback window and is only used when the early history
+looks continuous enough to support that inference.
 """
 from __future__ import annotations
 
@@ -27,6 +31,7 @@ from src.core.models import SymbolMetadata
 from src.data.market_universe import MarketUniverseService
 from src.data.nse_historical_source import NSEHistoricalOHLCVSource
 from src.data.nse_official_source import NSEOfficialUniverseSource
+from src.runtime.ipo_radar import IPOOpportunity, RecentIPORadar
 
 
 @dataclass
@@ -53,6 +58,8 @@ class SwingScanSummary:
     technical_success_count: int
     technical_failure_count: int
     shortlist_count: int
+    ipo_opportunity_count: int
+    ipo_shortlist: list[dict]
     historical_diagnostics: dict
 
 
@@ -103,6 +110,11 @@ def run(
     )
     eligible = [r for r in discovery_results if r.eligible and r.pit_safe]
 
+    # Separate IPO track. It intentionally runs on the full market_data map,
+    # including symbols rejected by the normal long-history screen.
+    ipo_radar = RecentIPORadar(as_of_date=as_of_date)
+    ipo_rows: list[IPOOpportunity] = ipo_radar.scan(market_data, limit=25)
+
     # The technical agent is async but performs CPU-bound pandas calculations.
     # Run each candidate in a worker thread so --workers controls parallelism.
     def analyze_sync(result):
@@ -149,6 +161,8 @@ def run(
         technical_success_count=len(rows),
         technical_failure_count=technical_failures,
         shortlist_count=len(shortlist),
+        ipo_opportunity_count=len(ipo_rows),
+        ipo_shortlist=[row.to_dict() for row in ipo_rows],
         historical_diagnostics=diagnostics,
     )
     return summary, shortlist
