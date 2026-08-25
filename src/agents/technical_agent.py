@@ -1,6 +1,7 @@
 """Technical Analysis Specialist Agent — P0 #14C."""
 from datetime import date, datetime
 from typing import Any
+import math
 import pandas as pd
 from src.agents.base_agent import BaseAgent
 from src.core.evidence import EvidenceGraph
@@ -30,6 +31,53 @@ class TechnicalAnalysisAgent(BaseAgent):
     @staticmethod
     def _pit_slice(df: pd.DataFrame, decision_time: datetime | date) -> pd.DataFrame:
         return PointInTimeFilter.filter_market_data(df, decision_time)
+
+    @staticmethod
+    def _clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
+        return max(low, min(high, value))
+
+    @classmethod
+    def _technical_score(cls, close: float, ema_20: float, ema_50: float, ema_200: float,
+                         rsi: float, adx: float, rvol: float, pattern_quality: float,
+                         pattern_matched: bool) -> float:
+        """Continuous 0-100 technical quality score.
+
+        Unlike the original bucketed score, this preserves cross-sectional differences
+        in trend distance, momentum, trend strength, volume and pattern quality.
+        It remains deterministic and is still only a specialist score, not conviction.
+        """
+        # Trend structure: 30 points. Distances are normalized so very large gaps do
+        # not dominate the score while modest differences remain visible.
+        close_20 = cls._clamp((close / ema_20 - 0.97) / 0.08)
+        ema_spread = cls._clamp((ema_20 / ema_50 - 0.97) / 0.08)
+        close_200 = cls._clamp((close / ema_200 - 0.95) / 0.15)
+        trend_points = 30.0 * (0.45 * close_20 + 0.35 * ema_spread + 0.20 * close_200)
+
+        # RSI quality: 20 points. Best zone is constructive momentum, while both
+        # weak and extremely overbought readings are penalized.
+        if rsi < 45.0:
+            rsi_quality = cls._clamp((rsi - 25.0) / 20.0) * 0.45
+        elif rsi <= 65.0:
+            rsi_quality = 0.55 + 0.45 * cls._clamp((rsi - 45.0) / 20.0)
+        elif rsi <= 75.0:
+            rsi_quality = 1.0 - 0.35 * cls._clamp((rsi - 65.0) / 10.0)
+        else:
+            rsi_quality = 0.65 * math.exp(-(rsi - 75.0) / 12.0)
+        rsi_points = 20.0 * cls._clamp(rsi_quality)
+
+        # ADX: 15 points. Continuous rather than a single >=25 threshold.
+        adx_points = 15.0 * cls._clamp((adx - 12.0) / 28.0)
+
+        # Relative volume: 10 points. 1x is neutral; sustained expansion gets more
+        # credit, capped to avoid one anomalous print dominating.
+        rvol_points = 10.0 * cls._clamp((rvol - 0.60) / 1.40)
+
+        # Pattern: 25 points. A matched high-quality pattern contributes materially,
+        # while no pattern still permits a strong trend/momentum setup to score well.
+        pattern_points = 25.0 * (cls._clamp(pattern_quality / 100.0) if pattern_matched else 0.0)
+
+        score = trend_points + rsi_points + adx_points + rvol_points + pattern_points
+        return round(cls._clamp(score, 0.0, 100.0), 1)
 
     async def _analyze(self, symbol_meta: SymbolMetadata, df: pd.DataFrame,
                        evidence_graph: EvidenceGraph, run_id: str,
@@ -67,20 +115,11 @@ class TechnicalAnalysisAgent(BaseAgent):
         matched_patterns = PatternRecognizer.evaluate_all_patterns(df)
         top_pattern = matched_patterns[0] if matched_patterns else None
 
-        # Preserve the existing deterministic specialist score; this is NOT final conviction.
-        raw_score = 40.0
-        if close > ema_20: raw_score += 10.0
-        if ema_20 > ema_50: raw_score += 10.0
-        if close > ema_200: raw_score += 10.0
-        if 58.0 <= rsi <= 74.0: raw_score += 10.0
-        elif 50.0 <= rsi < 58.0: raw_score += 5.0
-        if adx >= 25.0: raw_score += 5.0
-        if top_pattern and top_pattern.is_matched: raw_score += min(15.0, top_pattern.quality_score * 0.16)
-        if rvol >= 1.5: raw_score += 5.0
-        # AgentOutput.score is contractually bounded to [0, 100]. The component
-        # bonuses above can legitimately total slightly above 100, so clamp rather
-        # than allowing an otherwise valid technical analysis to fail validation.
-        score = min(100.0, max(0.0, raw_score))
+        score = self._technical_score(
+            close, ema_20, ema_50, ema_200, rsi, adx, rvol,
+            top_pattern.quality_score if top_pattern else 0.0,
+            bool(top_pattern and top_pattern.is_matched),
+        )
 
         bar_factor = min(1.0, len(df) / 100.0)
         pattern_bonus = 0.12 if (top_pattern and top_pattern.is_matched) else 0.0
@@ -102,7 +141,7 @@ class TechnicalAnalysisAgent(BaseAgent):
         if rsi > 78.0: risks.append(f"Short-term RSI extended at {rsi:.1f}")
 
         return AgentOutput(agent_name=self.agent_name, symbol=symbol, run_id=run_id,
-            status=AgentStatus.SUCCESS, signal=signal, score=round(score, 1), confidence=confidence,
+            status=AgentStatus.SUCCESS, signal=signal, score=score, confidence=confidence,
             data_freshness=DataFreshness.RECENT,
             metrics={"rsi_14": round(rsi,1), "adx_14": round(adx,1), "rvol_20": round(rvol,2),
                 "pattern_detected": top_pattern.pattern_type.value if top_pattern else PatternType.NO_PATTERN.value,
