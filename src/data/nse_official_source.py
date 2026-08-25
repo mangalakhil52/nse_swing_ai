@@ -1,15 +1,16 @@
-"""Official NSE public-file sources.
-
-NSE publishes the equity master at nsearchives.nseindia.com and CM-UDiFF
-bhavcopies as dated ZIP/CSV files. These adapters use those official files
-rather than a third-party market-data API.
-"""
+"""Official NSE public-file sources without an extra HTTP dependency."""
 from __future__ import annotations
 import io
 import zipfile
 from datetime import date
+from urllib.request import Request, urlopen
 import pandas as pd
-import requests
+
+
+def _get(url: str, timeout: float) -> bytes:
+    req = Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "*/*"})
+    with urlopen(req, timeout=timeout) as response:
+        return response.read()
 
 
 class NSEOfficialUniverseSource:
@@ -19,19 +20,16 @@ class NSEOfficialUniverseSource:
         self.timeout_seconds = timeout_seconds
 
     def fetch(self) -> list[dict]:
-        headers = {"User-Agent": "Mozilla/5.0", "Accept": "text/csv,application/octet-stream"}
-        with requests.Session() as session:
-            session.headers.update(headers)
-            response = session.get(self.URL, timeout=self.timeout_seconds)
-            response.raise_for_status()
-        df = pd.read_csv(io.BytesIO(response.content))
+        df = pd.read_csv(io.BytesIO(_get(self.URL, self.timeout_seconds)))
         required = {"SYMBOL", "SERIES"}
         if not required.issubset(df.columns):
             raise ValueError(f"NSE equity master missing columns: {sorted(required - set(df.columns))}")
         rows = []
         for row in df.itertuples(index=False):
             if str(getattr(row, "SERIES", "")).strip().upper() in {"EQ", "BE", "BZ"}:
-                rows.append({"symbol": str(getattr(row, "SYMBOL", "")).strip().upper(), "exchange": "NSE"})
+                symbol = str(getattr(row, "SYMBOL", "")).strip().upper()
+                if symbol:
+                    rows.append({"symbol": symbol, "exchange": "NSE"})
         if not rows:
             raise ValueError("NSE equity master returned no eligible equity symbols")
         return rows
@@ -55,12 +53,8 @@ class NSEOfficialBhavcopySource:
 
     def _download_frame(self) -> pd.DataFrame:
         url = self.URL_TEMPLATE.format(date=self.as_of_date.strftime("%Y%m%d"))
-        headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/zip,application/octet-stream"}
-        with requests.Session() as session:
-            session.headers.update(headers)
-            response = session.get(url, timeout=self.timeout_seconds)
-            response.raise_for_status()
-        with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        raw_bytes = _get(url, self.timeout_seconds)
+        with zipfile.ZipFile(io.BytesIO(raw_bytes)) as archive:
             csv_names = [n for n in archive.namelist() if n.lower().endswith(".csv")]
             if not csv_names:
                 raise ValueError("NSE bhavcopy ZIP contains no CSV")
