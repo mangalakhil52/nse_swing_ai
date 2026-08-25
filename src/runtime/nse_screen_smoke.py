@@ -35,7 +35,7 @@ def run(as_of_date: date, lookback_calendar_days: int = 140, max_workers: int = 
         try:
             df = source.fetch(item.symbol)
             return CandidateDiscoveryEngine.discover_candidates(
-                universe=[item], as_of_date=as_of_date, market_data_map={item.symbol: df], config=config
+                universe=[item], as_of_date=as_of_date, market_data_map={item.symbol: df}, config=config
             )[0]
         except Exception as exc:
             return exc
