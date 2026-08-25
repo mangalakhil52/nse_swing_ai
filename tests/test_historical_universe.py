@@ -13,8 +13,11 @@ Validates that:
 """
 
 from datetime import date
+
+import pandas as pd
 import pytest
 
+from config.settings import settings
 from src.core.models import SymbolMetadata
 from src.data.historical_universe import HistoricalUniverseProvider, HistoricalUniverseUnavailableError
 from src.quant.relative_strength import RelativeStrengthEngine
@@ -29,11 +32,29 @@ def test_historical_universe_does_not_fallback_to_current_universe():
     assert "Fallback to current live watchlist is strictly forbidden" in str(exc_info.value)
 
 
-def test_get_current_universe_separate_from_historical():
-    """2. Test get_current_universe returns live focus watchlist separately from historical queries."""
+def test_get_current_universe_separate_from_historical(tmp_path, monkeypatch):
+    """2. Test get_current_universe reads the official-equity-master cache independently of historical queries."""
+    # CI and fresh environments intentionally have no pre-existing cache. Keep this
+    # test deterministic by supplying a minimal fixture that mirrors NSE's security
+    # master shape rather than depending on developer-local state or live networking.
+    cache_dir = tmp_path / "cache"
+    bhavcopy_dir = cache_dir / "bhavcopy"
+    bhavcopy_dir.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {"SYMBOL": "RELIANCE", "SERIES": "EQ"},
+            {"SYMBOL": "TCS", "SERIES": "EQ"},
+            {"SYMBOL": "IGNORED", "SERIES": "SM"},
+            {"SYMBOL": "DUP", "SERIES": "EQ"},
+            {"SYMBOL": "DUP", "SERIES": "EQ"},
+        ]
+    ).to_csv(bhavcopy_dir / "EQUITY_L.csv", index=False)
+
+    monkeypatch.setattr(settings, "CACHE_DIR", cache_dir)
+
     current_symbols = HistoricalUniverseProvider.get_current_universe()
     assert isinstance(current_symbols, list)
-    assert len(current_symbols) > 0
+    assert current_symbols == ["RELIANCE", "TCS", "IGNORED", "DUP"]
     assert "RELIANCE" in current_symbols
 
 
@@ -61,18 +82,15 @@ def test_historically_active_stock_can_exist_after_later_delisting():
         symbol="DECOMM_CORP",
         company_name="Decommissioned Corp Ltd",
         listing_date=date(2020, 1, 1),
-        delisting_date=date(2026, 5, 15),  # Delisted in May 2026
+        delisting_date=date(2026, 5, 15),
     )
 
-    # At 2026-05-14: Delisting is in the future -> Eligible at T
     res_t = HistoricalUniverseProvider.filter_universe_by_date([sec], date(2026, 5, 14))
     assert len(res_t) == 1
 
-    # At 2026-05-15: Delisted -> Excluded
     res_on_delist = HistoricalUniverseProvider.filter_universe_by_date([sec], date(2026, 5, 15))
     assert len(res_on_delist) == 0
 
-    # At 2026-06-01: Delisted -> Excluded
     res_after = HistoricalUniverseProvider.filter_universe_by_date([sec], date(2026, 6, 1))
     assert len(res_after) == 0
 
@@ -84,8 +102,6 @@ def test_current_survivor_list_cannot_be_used_as_historical_universe():
     survivor_c = SymbolMetadata(symbol="TCS", company_name="Tata Consultancy Services", listing_date=date(2004, 8, 25))
 
     current_universe = [survivor_a, survivor_b_future, survivor_c]
-
-    # Query historical universe at 2026-05-01
     hist_symbols = HistoricalUniverseProvider.get_universe_for_date(date(2026, 5, 1), current_universe)
 
     assert "RELIANCE" in hist_symbols
@@ -102,11 +118,9 @@ def test_partial_metadata_filtering():
 
     securities = [sec_a, sec_b, sec_c]
 
-    # At 2026-05-14: STOCK_A active, STOCK_B & STOCK_C eligible
     res = HistoricalUniverseProvider.filter_universe_by_date(securities, date(2026, 5, 14))
     assert len(res) == 3
 
-    # At 2026-05-15: STOCK_A delisted -> STOCK_B & STOCK_C eligible
     res_delist = HistoricalUniverseProvider.filter_universe_by_date(securities, date(2026, 5, 15))
     assert len(res_delist) == 2
     symbols_delist = [s.symbol for s in res_delist]
@@ -118,21 +132,20 @@ def test_partial_metadata_filtering():
 def test_cross_sectional_ranking_uses_historical_universe():
     """7. Test cross-sectional percentile ranking ranks only eligible historical securities at T."""
     sec_a = SymbolMetadata(symbol="STOCK_A", company_name="Stock A Ltd", listing_date=date(2020, 1, 1))
-    sec_b = SymbolMetadata(symbol="STOCK_B", company_name="Stock B Ltd", listing_date=date(2026, 9, 1))  # Not listed at T
+    sec_b = SymbolMetadata(symbol="STOCK_B", company_name="Stock B Ltd", listing_date=date(2026, 9, 1))
 
-    # Filter universe at T = 2026-05-01
     as_of = date(2026, 5, 1)
     eligible = HistoricalUniverseProvider.filter_universe_by_date([sec_a, sec_b], as_of)
     eligible_symbols = {s.symbol for s in eligible}
 
-    raw_scores = {"STOCK_A": 15.2, "STOCK_B": 99.0}  # STOCK_B has high score in raw data
+    raw_scores = {"STOCK_A": 15.2, "STOCK_B": 99.0}
     filtered_scores = {k: v for k, v in raw_scores.items() if k in eligible_symbols}
 
     percentiles = RelativeStrengthEngine.calculate_universe_percentile_ranks(filtered_scores)
 
     assert "STOCK_A" in percentiles
     assert "STOCK_B" not in percentiles
-    assert percentiles["STOCK_A"] == 0.0  # Sole eligible stock
+    assert percentiles["STOCK_A"] == 0.0
 
 
 def test_future_ipo_cannot_enter_historical_signal_pipeline():
