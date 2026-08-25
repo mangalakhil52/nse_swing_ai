@@ -22,6 +22,24 @@ class NSEHistoricalOHLCVSource:
         self.fetcher = fetcher or self._download
         self._cache: dict[date, pd.DataFrame] = {}
 
+    @staticmethod
+    def _normalize_columns(columns) -> dict:
+        """Normalize NSE headers while retaining the canonical UDiFF names."""
+        normalized = {}
+        for col in columns:
+            key = str(col).replace("\ufeff", "").strip()
+            normalized[key.lower()] = col
+        aliases = {
+            "tckrsymb": "TckrSymb",
+            "traddt": "TradDt",
+            "opnpric": "OpnPric",
+            "hghpric": "HghPric",
+            "lwpric": "LwPric",
+            "clspric": "ClsPric",
+            "ttltradgvol": "TtlTradgVol",
+        }
+        return {canonical: normalized[canonical.lower()] for canonical in aliases if canonical.lower() in normalized}
+
     def fetch(self, symbol: str) -> pd.DataFrame:
         start = self.as_of_date - timedelta(days=self.lookback_calendar_days)
         frames = []
@@ -52,7 +70,11 @@ class NSEHistoricalOHLCVSource:
 
     def _download(self, day: date) -> bytes:
         url = self.URL_TEMPLATE.format(date=day.strftime("%Y%m%d"))
-        req = Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/zip,application/octet-stream"})
+        req = Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0 Safari/537.36",
+            "Accept": "application/zip,application/octet-stream,*/*",
+            "Referer": "https://www.nseindia.com/",
+        })
         with urlopen(req, timeout=self.timeout_seconds) as response:
             return response.read()
 
@@ -63,15 +85,16 @@ class NSEHistoricalOHLCVSource:
                 raise ValueError(f"No CSV in NSE bhavcopy for {day}")
             with archive.open(names[0]) as handle:
                 raw = pd.read_csv(handle)
-        missing = self.REQUIRED - set(raw.columns)
+        mapping = self._normalize_columns(raw.columns)
+        missing = self.REQUIRED - set(mapping)
         if missing:
-            raise ValueError(f"NSE bhavcopy missing columns: {sorted(missing)}")
+            raise ValueError(f"NSE bhavcopy missing columns: {sorted(missing)}; received={list(raw.columns)}")
         return pd.DataFrame({
-            "symbol": raw["TckrSymb"].astype(str).str.strip().str.upper(),
-            "timestamp": pd.to_datetime(raw["TradDt"], errors="coerce"),
-            "open": pd.to_numeric(raw["OpnPric"], errors="coerce"),
-            "high": pd.to_numeric(raw["HghPric"], errors="coerce"),
-            "low": pd.to_numeric(raw["LwPric"], errors="coerce"),
-            "close": pd.to_numeric(raw["ClsPric"], errors="coerce"),
-            "volume": pd.to_numeric(raw["TtlTradgVol"], errors="coerce"),
+            "symbol": raw[mapping["TckrSymb"]].astype(str).str.strip().str.upper(),
+            "timestamp": pd.to_datetime(raw[mapping["TradDt"]], errors="coerce"),
+            "open": pd.to_numeric(raw[mapping["OpnPric"]], errors="coerce"),
+            "high": pd.to_numeric(raw[mapping["HghPric"]], errors="coerce"),
+            "low": pd.to_numeric(raw[mapping["LwPric"]], errors="coerce"),
+            "close": pd.to_numeric(raw[mapping["ClsPric"]], errors="coerce"),
+            "volume": pd.to_numeric(raw[mapping["TtlTradgVol"]], errors="coerce"),
         }).dropna()
