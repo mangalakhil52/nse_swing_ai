@@ -21,34 +21,27 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.data.nse_historical_source import NSEHistoricalOHLCVSource
 
 # NSE Capital Market holiday calendars. These are intentionally explicit and
-# versioned: an exchange holiday is not a failed data download. Sources:
-# NSE CM holiday circulars for 2023, 2024, 2025 and 2026.
+# versioned: an exchange holiday is not a failed data download. Includes the
+# additional full-market holidays exposed by the OOS archive diagnostics.
 NSE_CM_HOLIDAYS = {
     date(2023, 1, 26), date(2023, 3, 7), date(2023, 3, 30), date(2023, 4, 4),
     date(2023, 4, 7), date(2023, 4, 14), date(2023, 5, 1), date(2023, 6, 28),
     date(2023, 8, 15), date(2023, 9, 19), date(2023, 10, 2), date(2023, 10, 24),
     date(2023, 11, 14), date(2023, 11, 27), date(2023, 12, 25),
-    date(2024, 1, 26), date(2024, 3, 8), date(2024, 3, 25), date(2024, 3, 29),
-    date(2024, 4, 11), date(2024, 4, 17), date(2024, 5, 1), date(2024, 6, 17),
-    date(2024, 7, 17), date(2024, 8, 15), date(2024, 10, 2), date(2024, 11, 1),
-    date(2024, 11, 15), date(2024, 12, 25),
+    date(2024, 1, 22), date(2024, 1, 26), date(2024, 3, 8), date(2024, 3, 25),
+    date(2024, 3, 29), date(2024, 4, 11), date(2024, 4, 17), date(2024, 5, 1),
+    date(2024, 5, 20), date(2024, 6, 17), date(2024, 7, 17), date(2024, 8, 15),
+    date(2024, 10, 2), date(2024, 11, 1), date(2024, 11, 15), date(2024, 11, 20),
+    date(2024, 12, 25),
     date(2025, 2, 26), date(2025, 3, 14), date(2025, 3, 31), date(2025, 4, 10),
     date(2025, 4, 14), date(2025, 4, 18), date(2025, 5, 1), date(2025, 8, 15),
     date(2025, 8, 27), date(2025, 10, 2), date(2025, 10, 21), date(2025, 10, 22),
     date(2025, 11, 5), date(2025, 12, 25),
-    date(2026, 1, 26), date(2026, 3, 3), date(2026, 3, 26), date(2026, 3, 31),
-    date(2026, 4, 3), date(2026, 4, 14), date(2026, 5, 1), date(2026, 5, 28),
-    date(2026, 6, 26), date(2026, 9, 14), date(2026, 10, 2), date(2026, 10, 20),
-    date(2026, 11, 10), date(2026, 11, 24), date(2026, 12, 25),
+    date(2026, 1, 15), date(2026, 1, 26), date(2026, 3, 3), date(2026, 3, 26),
+    date(2026, 3, 31), date(2026, 4, 3), date(2026, 4, 14), date(2026, 5, 1),
+    date(2026, 5, 28), date(2026, 6, 26), date(2026, 9, 14), date(2026, 10, 2),
+    date(2026, 10, 20), date(2026, 11, 10), date(2026, 11, 24), date(2026, 12, 25),
 }
-
-
-def _trading_days(start: date, end: date):
-    day = start
-    while day <= end:
-        if day.weekday() < 5 and day not in NSE_CM_HOLIDAYS:
-            yield day
-        day += timedelta(days=1)
 
 
 def build(start: date, end: date, output_dir: Path, timeout: float = 30.0) -> dict:
