@@ -1,11 +1,11 @@
 """Minimal stdlib web adapter for the NSE Swing AI command center.
 
 Serves ./web as static assets and exposes:
-  GET /api/dashboard  -> current dashboard state
-  GET /api/events     -> Server-Sent Events stream
+  GET /api/dashboard -> current dashboard state
+  GET /api/events -> Server-Sent Events stream
 
-It deliberately has no market-data logic. The scanner should publish events
-through web.api_contract.BUS; this prevents the UI from inventing data.
+The scanner publishes real telemetry through web.api_contract.BUS; the UI never
+invents market data.
 """
 from __future__ import annotations
 
@@ -16,7 +16,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from api_contract import BUS, dashboard_payload, sse_payload
+try:
+    from .api_contract import BUS, dashboard_payload, sse_payload
+except ImportError:
+    from api_contract import BUS, dashboard_payload, sse_payload
 
 ROOT = Path(__file__).resolve().parent
 
@@ -61,12 +64,11 @@ class Handler(BaseHTTPRequestHandler):
             body = (ROOT / "index.html").read_bytes()
             self._send(200, "text/html; charset=utf-8", body)
             return
-        if path.startswith("/"):
-            candidate = (ROOT / path.lstrip("/")).resolve()
-            if ROOT in candidate.parents and candidate.is_file():
-                content_type = "text/css; charset=utf-8" if candidate.suffix == ".css" else "application/javascript; charset=utf-8"
-                self._send(200, content_type, candidate.read_bytes())
-                return
+        candidate = (ROOT / path.lstrip("/")).resolve()
+        if ROOT in candidate.parents and candidate.is_file():
+            content_type = "text/css; charset=utf-8" if candidate.suffix == ".css" else "application/javascript; charset=utf-8"
+            self._send(200, content_type, candidate.read_bytes())
+            return
         self._send(404, "application/json; charset=utf-8", b'{"error":"not_found"}')
 
 
