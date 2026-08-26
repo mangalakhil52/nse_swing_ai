@@ -6,7 +6,7 @@ on:
       start_date:
         description: 'Historical start date (YYYY-MM-DD)'
         required: true
-        default: '2023-08-01'
+        default: '2023-07-26'
       end_date:
         description: 'Historical end date (YYYY-MM-DD)'
         required: true
@@ -34,7 +34,7 @@ on:
         type: boolean
 
 env:
-  OOS_START: ${{ inputs.start_date || '2023-08-01' }}
+  OOS_START: ${{ inputs.start_date || '2023-07-26' }}
   OOS_END: ${{ inputs.end_date || '2026-08-24' }}
   OOS_TRAIN: ${{ inputs.train_days || '504' }}
   OOS_VALIDATION: ${{ inputs.validation_days || '126' }}
