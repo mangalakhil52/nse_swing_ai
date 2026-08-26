@@ -33,6 +33,16 @@ class Settings(BaseSettings):
     REQUEST_TIMEOUT_SECONDS: int = Field(default=20)
     USER_AGENT: str = Field(default="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/125.0.0.0 Safari/537.36")
 
+    # Upstox is the optional authenticated live/intraday provider. No key/token is
+    # committed to source; provide them through environment variables/secrets.
+    UPSTOX_ENABLED: bool = Field(default=False)
+    UPSTOX_API_KEY: str = Field(default="")
+    UPSTOX_ACCESS_TOKEN: str = Field(default="")
+    UPSTOX_BASE_URL: str = Field(default="https://api.upstox.com")
+    UPSTOX_INSTRUMENT_MASTER_URL: str = Field(default="https://assets.upstox.com/market-quote/instruments/exchange/NSE.json.gz")
+    UPSTOX_TIMEOUT_SECONDS: int = Field(default=20)
+    UPSTOX_BATCH_SIZE: int = Field(default=500)
+
     # Optional secondary evidence provider. Core scanning works with this disabled.
     INDIANAPI_API_KEY: str = Field(default="")
     INDIANAPI_BASE_URL: str = Field(default="https://analyst.indianapi.in")
