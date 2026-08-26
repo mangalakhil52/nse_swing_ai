@@ -60,7 +60,6 @@ class NSEHistoricalOHLCVSource:
         return out
 
     def fetch_many(self, symbols: list[str]) -> dict[str, pd.DataFrame]:
-        """Build all requested symbols from one download per calendar trading day."""
         self.diagnostics.reset()
         wanted = {str(s).strip().upper() for s in symbols if str(s).strip()}
         start = self.as_of_date - timedelta(days=self.lookback_calendar_days)
@@ -105,14 +104,11 @@ class NSEHistoricalOHLCVSource:
         return self._cache[day]
 
     def _download(self, day: date) -> bytes:
-        """Use the archive format appropriate for the historical date."""
         if day < self.UDIFF_CUTOVER:
             return self._download_legacy_archive(day)
         try:
             return self._download_report_api(day)
-        except FileNotFoundError:
-            raise
-        except (OSError, IOError, ValueError, httpx.HTTPError):
+        except (OSError, IOError, ValueError, httpx.HTTPError, FileNotFoundError):
             return self._download_udiff_archive(day)
 
     def _download_report_api(self, day: date) -> bytes:
@@ -167,9 +163,7 @@ class NSEHistoricalOHLCVSource:
 
     def _download_legacy_archive(self, day: date) -> bytes:
         month = day.strftime("%b").upper()
-        url = self.LEGACY_ARCHIVE_URL_TEMPLATE.format(
-            year=day.year, month=month, day=f"{day.day:02d}"
-        )
+        url = self.LEGACY_ARCHIVE_URL_TEMPLATE.format(year=day.year, month=month, day=f"{day.day:02d}")
         return self._download_url(url, day)
 
     def _download_url(self, url: str, day: date) -> bytes:
@@ -186,13 +180,11 @@ class NSEHistoricalOHLCVSource:
     def _normalize_columns(columns) -> dict[str, str]:
         normalized = {str(col).replace("\ufeff", "").strip().lower(): col for col in columns}
         aliases = {
-            "tckrsymb": "TckrSymb", "traddt": "TradDt", "opnpric": "OpnPric",
-            "hghpric": "HghPric", "lwpric": "LwPric", "clspric": "ClsPric",
-            "ttltradgvol": "TtlTradgVol",
-            # Legacy CM bhavcopy (pre-UDiFF)
-            "symbol": "TckrSymb", "series": "Series", "timestamp": "TradDt",
-            "open": "OpnPric", "high": "HghPric", "low": "LwPric", "close": "ClsPric",
-            "tottrdqty": "TtlTradgVol", "tottrdqty": "TtlTradgVol", "tottrdval": "TtlTradgVol",
+            "tckrsymb": "TckrSymb", "traddt": "TradDt", "opnpric": "OpnPric", "hghpric": "HghPric",
+            "lwpric": "LwPric", "clspric": "ClsPric", "ttltradgvol": "TtlTradgVol",
+            "symbol": "TckrSymb", "series": "Series", "timestamp": "TradDt", "open": "OpnPric",
+            "high": "HghPric", "low": "LwPric", "close": "ClsPric", "tottrdqty": "TtlTradgVol",
+            "tottrdval": "TtlTradgVol",
         }
         return {canonical: normalized[key] for key, canonical in aliases.items() if key in normalized}
 
@@ -203,13 +195,11 @@ class NSEHistoricalOHLCVSource:
                 raise ValueError(f"No CSV in NSE bhavcopy for {day}")
             with archive.open(names[0]) as handle:
                 raw = pd.read_csv(handle)
-
         mapping = self._normalize_columns(raw.columns)
         required = {"TckrSymb", "TradDt", "OpnPric", "HghPric", "LwPric", "ClsPric", "TtlTradgVol"}
         missing = required - set(mapping)
         if missing:
             raise ValueError(f"NSE bhavcopy missing columns: {sorted(missing)}; received={list(raw.columns)}")
-
         out = pd.DataFrame({
             "symbol": raw[mapping["TckrSymb"]].astype(str).str.strip().str.upper(),
             "timestamp": pd.to_datetime(raw[mapping["TradDt"]], errors="coerce", dayfirst=False),
@@ -219,8 +209,6 @@ class NSEHistoricalOHLCVSource:
             "close": pd.to_numeric(raw[mapping["ClsPric"]], errors="coerce"),
             "volume": pd.to_numeric(raw[mapping["TtlTradgVol"]], errors="coerce"),
         }).dropna()
-        # Legacy files contain multiple series; retain normal equity series only
-        # when the Series column exists, avoiding preference shares/debt records.
         series_col = mapping.get("Series")
         if series_col is not None:
             series = raw.loc[out.index, series_col].astype(str).str.upper()
