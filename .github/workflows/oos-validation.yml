@@ -1,8 +1,6 @@
 name: Walk-Forward OOS Validation
 
 on:
-  push:
-    branches: [feat/oos-validation-runner-9]
   workflow_dispatch:
     inputs:
       start_date:
@@ -78,8 +76,6 @@ jobs:
           print(json.dumps(m, indent=2))
           if m['successful_days'] <= 0 or m['symbols'] <= 0:
               raise SystemExit('OOS dataset preparation produced no usable history')
-          # Weekday-only iteration includes exchange holidays; allow a bounded
-          # holiday/missing-archive rate while still failing obvious outages.
           if m['failed_days'] > max(60, int(m['attempted_days'] * 0.10)):
               raise SystemExit(f"Too many failed historical days: {m['failed_days']}/{m['attempted_days']}")
           PY
