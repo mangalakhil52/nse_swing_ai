@@ -1,0 +1,40 @@
+name: Confluence Research
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: 'Historical start date'
+        required: true
+        default: '2023-07-26'
+      end_date:
+        description: 'Historical end date'
+        required: true
+        default: '2026-08-24'
+
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 180
+    steps:
+      - name: Checkout strategy branch
+        uses: actions/checkout@v4
+        with:
+          ref: feat/oos-validation-runner-9
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Build historical dataset
+        run: python scripts/build_oos_dataset.py --start '${{ inputs.start_date }}' --end '${{ inputs.end_date }}' --output artifacts/oos_data
+      - name: Run confluence research
+        run: python scripts/run_confluence_research.py --data-dir artifacts/oos_data --output artifacts/confluence_research.json
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: confluence-research-report
+          path: artifacts/confluence_research.json
