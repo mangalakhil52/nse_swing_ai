@@ -2,9 +2,9 @@
 """Daily EOD scan using the complete official NSE equity universe.
 
 Pipeline:
-  dynamic NSE universe -> official EOD data -> cheap liquidity/price gate
-  -> full historical technical screen -> top 100 -> specialist CIO research
-  -> strict risk/EV/conviction gates -> top 0-3 recommendations.
+  dynamic universe -> EOD exchange snapshot -> liquidity gate -> historical data
+  -> complete market regime -> technical screen -> top 100 -> CIO research
+  -> empirical EV/risk gates -> top 0-3 recommendations.
 
 No hardcoded stock list and no synthetic market-data fallback are permitted.
 """
@@ -39,11 +39,7 @@ from src.quant.screener import QuantScreener
 from src.shadow.alerts import TelegramFormatter
 from web.api_contract import BUS
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
 logger = logging.getLogger("run_daily_scan")
 
 
@@ -55,9 +51,9 @@ async def _load_history(symbol: str, start: date, end: date, upstox: UpstoxDataP
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="NSE Swing AI Daily Scanner")
-    parser.add_argument("--date", type=str, default=None, help="Scan date (YYYY-MM-DD)")
-    parser.add_argument("--dry-run", action="store_true", help="Run without persisting")
-    parser.add_argument("--force", action="store_true", help="Force run on non-trading days")
+    parser.add_argument("--date", type=str, default=None)
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--force", action="store_true")
     return parser.parse_args()
 
 
@@ -79,13 +75,10 @@ async def run_scan(scan_date: date, dry_run: bool = False, force: bool = False) 
         else:
             universe_meta = await nse_provider.fetch_active_securities()
             logger.info("Official NSE equity universe: %d symbols", len(universe_meta))
-
         if not universe_meta:
             raise DataUnavailableException("DATA_UNAVAILABLE: dynamic NSE equity master is empty")
-        BUS.publish({"type": "scan_progress", "universe": len(universe_meta), "processed": 0, "status": "UNIVERSE_LOADED"})
+        BUS.publish({"type": "scan_progress", "universe": len(universe_meta), "status": "UNIVERSE_LOADED"})
 
-        # EOD bhavcopy is the authoritative exchange-wide snapshot and supplies
-        # liquidity/price gates without making one API request per stock.
         bhavcopy_df = await nse_provider.fetch_bhavcopy_for_date(scan_date)
         if bhavcopy_df.empty:
             raise DataUnavailableException(f"DATA_UNAVAILABLE: empty NSE Bhavcopy for {scan_date}")
@@ -93,25 +86,6 @@ async def run_scan(scan_date: date, dry_run: bool = False, force: bool = False) 
 
         hist_provider = HistoricalDataProvider()
         start_history_date = scan_date - timedelta(days=420)
-
-        # Market regime is computed from genuine NIFTY history when available.
-        nifty_df = pd.DataFrame()
-        try:
-            if upstox is not None:
-                nifty_df = await upstox.get_index_daily_ohlcv("NIFTY 50", start_history_date, scan_date)
-            else:
-                nifty_df = await hist_provider.get_daily_ohlcv("NIFTY 50", start_history_date, scan_date, min_bars=50)
-        except Exception as exc:
-            logger.warning("NIFTY 50 data unavailable: %s", exc)
-
-        regime_result = MarketRegimeClassifier.classify_regime(nifty_df=nifty_df)
-        logger.info("Regime=%s | stance=%s", regime_result.regime.value, regime_result.trading_stance.value)
-        BUS.publish({"type": "alert", "severity": "green", "message": f"Market regime: {regime_result.regime.value}"})
-        if not regime_result.allow_long_swing_trades:
-            logger.warning("Regime prohibits long swing trades; returning zero recommendations")
-            BUS.publish({"type": "scan_progress", "processed": 0, "status": "NO_TRADE_REGIME"})
-            return 0
-
         screener = QuantScreener(min_adtv_crores=5.0, min_price=20.0)
         bhavcopy_df["_symbol"] = bhavcopy_df["symbol"].astype(str).str.strip().str.upper()
         bhav_by_symbol = bhavcopy_df.set_index("_symbol")
@@ -128,9 +102,8 @@ async def run_scan(scan_date: date, dry_run: bool = False, force: bool = False) 
             turnover = float(row.get("turnover_crores", (close * volume) / 1e7))
             if close >= 20.0 and turnover >= 3.0:
                 filtered_meta.append(meta)
-
         logger.info("Bhavcopy pre-filter: %d candidates", len(filtered_meta))
-        BUS.publish({"type": "scan_progress", "filtered": len(filtered_meta), "processed": 0, "status": "LIQUIDITY_FILTER"})
+        BUS.publish({"type": "scan_progress", "filtered": len(filtered_meta), "status": "LIQUIDITY_FILTER"})
 
         stock_dfs: dict[str, pd.DataFrame] = {}
         eligible_meta: list[SymbolMetadata] = []
@@ -154,36 +127,64 @@ async def run_scan(scan_date: date, dry_run: bool = False, force: bool = False) 
         logger.info("Historical data loaded: %d/%d symbols", len(eligible_meta), len(filtered_meta))
         BUS.publish({"type": "scan_progress", "processed": len(eligible_meta), "status": "HISTORY_LOADED"})
 
-        candidates = screener.screen_universe(eligible_meta, stock_dfs, nifty_df)
-        # The specialist layer is deliberately capped at 100; this keeps the
-        # expensive research stage deterministic and within operational limits.
-        candidates = candidates[:100]
-        logger.info("Final Stage-1 candidates passed to CIO: %d", len(candidates))
-        BUS.publish({"type": "scan_progress", "candidates": len(candidates), "processed": len(eligible_meta), "status": "TECHNICAL_SCREEN_COMPLETE"})
+        # Complete market-regime inputs are now calculated from genuine observations.
+        # A/D and India VIX come from NSE live market data; breadth participation is
+        # calculated from the same historical stock universe already loaded above.
+        breadth = await nse_provider.get_market_breadth("NIFTY 500")
+        nifty_df = pd.DataFrame()
+        try:
+            if upstox is not None:
+                nifty_df = await upstox.get_index_daily_ohlcv("NIFTY 50", start_history_date, scan_date)
+            else:
+                nifty_df = await hist_provider.get_daily_ohlcv("NIFTY 50", start_history_date, scan_date, min_bars=50)
+        except Exception as exc:
+            raise DataUnavailableException(f"NIFTY 50 history unavailable: {exc}") from exc
+
+        above_50 = 0
+        breadth_population = 0
+        for df in stock_dfs.values():
+            if df is None or len(df) < 50:
+                continue
+            close = float(df["close"].iloc[-1])
+            sma50 = float(df["close"].tail(50).mean())
+            breadth_population += 1
+            above_50 += int(close > sma50)
+        if breadth_population < 100:
+            raise DataUnavailableException(f"Insufficient breadth population: {breadth_population} stocks")
+        pct_above_50_sma = above_50 / breadth_population * 100.0
+
+        regime_result = MarketRegimeClassifier.classify_regime(
+            nifty_df=nifty_df,
+            advance_decline_ratio=breadth.advance_decline_ratio,
+            pct_above_50_sma=pct_above_50_sma,
+            india_vix=breadth.india_vix,
+            as_of_date=scan_date,
+        )
+        logger.info("Regime=%s | stance=%s | A/D=%.2f | >50SMA=%.1f%% | VIX=%.2f", regime_result.regime.value, regime_result.trading_stance.value, breadth.advance_decline_ratio, pct_above_50_sma, breadth.india_vix or 0.0)
+        BUS.publish({"type": "alert", "severity": "green", "message": f"Regime {regime_result.regime.value} | A/D {breadth.advance_decline_ratio:.2f} | >50SMA {pct_above_50_sma:.1f}% | VIX {breadth.india_vix:.2f}"})
+        if not regime_result.allow_long_swing_trades:
+            BUS.publish({"type": "scan_progress", "status": "NO_TRADE_REGIME"})
+            return 0
+
+        candidates = screener.screen_universe(eligible_meta, stock_dfs, nifty_df)[:100]
+        logger.info("Stage-1 candidates passed to CIO: %d", len(candidates))
+        BUS.publish({"type": "scan_progress", "candidates": len(candidates), "intel": len(candidates), "status": "TECHNICAL_SCREEN_COMPLETE"})
         if not candidates:
             BUS.publish({"type": "scan_progress", "final": 0, "status": "NO_TRADE"})
             return 0
 
         cio = CIOOrchestrator()
-        recommendations = await cio.run_daily_scan(
-            candidates=candidates,
-            stock_dfs=stock_dfs,
-            universe={m.symbol: m for m in eligible_meta},
-            regime_result=regime_result,
-            run_id=run_id,
-        )
+        recommendations = await cio.run_daily_scan(candidates=candidates, stock_dfs=stock_dfs,
+            universe={m.symbol: m for m in eligible_meta}, regime_result=regime_result, run_id=run_id)
         logger.info("Scan complete: %d recommendations", len(recommendations))
-        BUS.publish({"type": "scan_progress", "intel": len(candidates), "final": len(recommendations), "processed": len(eligible_meta), "status": "COMPLETE" if recommendations else "NO_TRADE"})
+        BUS.publish({"type": "scan_progress", "final": len(recommendations), "status": "COMPLETE" if recommendations else "NO_TRADE"})
 
         if recommendations:
             for rec in recommendations:
-                BUS.publish({
-                    "type": "agent", "agent": "CIO FUSION", "status": "PASS", "progress": 100,
+                BUS.publish({"type": "agent", "agent": "CIO FUSION", "status": "PASS", "progress": 100,
                     "processed": len(candidates), "decision": getattr(rec, "conviction_grade", "TRADE"),
-                    "log": [f"{rec.symbol}: final recommendation", f"Entry {rec.trade_levels.entry_trigger_price:.2f}", f"T1 {rec.trade_levels.target_1:.2f}", f"SL {rec.trade_levels.stop_loss_price:.2f}"],
-                })
-            summary = TelegramFormatter.format_scan_summary(recommendations, regime_result.regime.value)
-            logger.info("Telegram Summary Output:\n%s", summary)
+                    "log": [f"{rec.symbol}: final recommendation", f"Entry {rec.trade_levels.entry_trigger_price:.2f}", f"T1 {rec.trade_levels.target_1:.2f}", f"SL {rec.trade_levels.stop_loss_price:.2f}"]})
+            logger.info("Telegram Summary Output:\n%s", TelegramFormatter.format_scan_summary(recommendations, regime_result.regime.value))
         return 0
     except DataUnavailableException as exc:
         logger.error("%s", exc)
@@ -205,7 +206,7 @@ async def run_scan(scan_date: date, dry_run: bool = False, force: bool = False) 
 def main() -> None:
     args = parse_args()
     scan_date = date.fromisoformat(args.date) if args.date else get_latest_trading_day(date.today())
-    sys.exit(asyncio.run(run_scan(scan_date, dry_run=args.dry_run, force=args.force)))
+    raise SystemExit(asyncio.run(run_scan(scan_date, dry_run=args.dry_run, force=args.force)))
 
 
 if __name__ == "__main__":
