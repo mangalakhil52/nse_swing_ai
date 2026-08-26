@@ -1,7 +1,10 @@
-"""Historical NSE daily OHLCV acquisition from official UDiFF bhavcopies.
+"""Historical NSE daily OHLCV acquisition from official bhavcopies.
 
-Uses NSE's public report API as the primary transport and the documented archive
-URL as a fallback. A trading-day file is downloaded at most once per source.
+NSE changed the capital-market bhavcopy format on 2024-07-08. Historical
+requests before that cutover must use the legacy EQUITIES archive; newer dates
+use the UDiFF report/archive. The source deliberately keeps these transports
+separate so a valid legacy trading day is never misclassified as a missing
+UDiFF archive.
 """
 from __future__ import annotations
 import io
@@ -9,7 +12,6 @@ import json
 import zipfile
 from dataclasses import dataclass, field
 from datetime import date, timedelta
-from urllib.parse import quote
 from urllib.request import Request, urlopen
 import httpx
 import pandas as pd
@@ -35,10 +37,11 @@ class HistoricalFetchDiagnostics:
 
 
 class NSEHistoricalOHLCVSource:
-    ARCHIVE_URL_TEMPLATE = "https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{date}_F_0000.csv.zip"
+    UDIFF_CUTOVER = date(2024, 7, 8)
+    UDIFF_ARCHIVE_URL_TEMPLATE = "https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{date}_F_0000.csv.zip"
+    LEGACY_ARCHIVE_URL_TEMPLATE = "https://archives.nseindia.com/content/historical/EQUITIES/{year}/{month}/cm{day}{month}{year}bhav.csv.zip"
     REPORT_API = "https://www.nseindia.com/api/reports"
     REPORT_NAME = "CM-UDiFF Common Bhavcopy Final (zip)"
-    REQUIRED = {"TckrSymb", "TradDt", "OpnPric", "HghPric", "LwPric", "ClsPric", "TtlTradgVol"}
 
     def __init__(self, as_of_date: date, lookback_calendar_days: int = 140, timeout_seconds: float = 20.0, fetcher=None):
         self.as_of_date = as_of_date
@@ -47,16 +50,6 @@ class NSEHistoricalOHLCVSource:
         self.fetcher = fetcher or self._download
         self._cache: dict[date, pd.DataFrame] = {}
         self.diagnostics = HistoricalFetchDiagnostics()
-
-    @staticmethod
-    def _normalize_columns(columns) -> dict[str, str]:
-        normalized = {str(col).replace("\ufeff", "").strip().lower(): col for col in columns}
-        aliases = {
-            "tckrsymb": "TckrSymb", "traddt": "TradDt", "opnpric": "OpnPric",
-            "hghpric": "HghPric", "lwpric": "LwPric", "clspric": "ClsPric",
-            "ttltradgvol": "TtlTradgVol",
-        }
-        return {canonical: normalized[key] for key, canonical in aliases.items() if key in normalized}
 
     def fetch(self, symbol: str) -> pd.DataFrame:
         data = self.fetch_many([symbol.upper()])
@@ -67,7 +60,6 @@ class NSEHistoricalOHLCVSource:
         return out
 
     def fetch_many(self, symbols: list[str]) -> dict[str, pd.DataFrame]:
-        """Build all requested symbols from one download per trading day."""
         self.diagnostics.reset()
         wanted = {str(s).strip().upper() for s in symbols if str(s).strip()}
         start = self.as_of_date - timedelta(days=self.lookback_calendar_days)
@@ -112,11 +104,12 @@ class NSEHistoricalOHLCVSource:
         return self._cache[day]
 
     def _download(self, day: date) -> bytes:
-        """Primary: NSE report API; fallback: documented archive URL."""
+        if day < self.UDIFF_CUTOVER:
+            return self._download_legacy_archive(day)
         try:
             return self._download_report_api(day)
-        except (OSError, IOError, ValueError, httpx.HTTPError):
-            return self._download_archive(day)
+        except (OSError, IOError, ValueError, httpx.HTTPError, FileNotFoundError):
+            return self._download_udiff_archive(day)
 
     def _download_report_api(self, day: date) -> bytes:
         archives = [{"name": self.REPORT_NAME, "type": "daily-reports", "category": "capital-market", "section": "equities"}]
@@ -164,11 +157,36 @@ class NSEHistoricalOHLCVSource:
                     return found
         return None
 
-    def _download_archive(self, day: date) -> bytes:
-        url = self.ARCHIVE_URL_TEMPLATE.format(date=day.strftime("%Y%m%d"))
+    def _download_udiff_archive(self, day: date) -> bytes:
+        url = self.UDIFF_ARCHIVE_URL_TEMPLATE.format(date=day.strftime("%Y%m%d"))
+        return self._download_url(url, day)
+
+    def _download_legacy_archive(self, day: date) -> bytes:
+        month = day.strftime("%b").upper()
+        url = self.LEGACY_ARCHIVE_URL_TEMPLATE.format(year=day.year, month=month, day=f"{day.day:02d}")
+        return self._download_url(url, day)
+
+    def _download_url(self, url: str, day: date) -> bytes:
         req = Request(url, headers={"User-Agent": "Mozilla/5.0", "Accept": "application/zip,application/octet-stream,*/*", "Referer": "https://www.nseindia.com/"})
-        with urlopen(req, timeout=self.timeout_seconds) as response:
-            return response.read()
+        try:
+            with urlopen(req, timeout=self.timeout_seconds) as response:
+                return response.read()
+        except Exception as exc:
+            if getattr(exc, "code", None) == 404:
+                raise FileNotFoundError(str(day)) from exc
+            raise
+
+    @staticmethod
+    def _normalize_columns(columns) -> dict[str, str]:
+        normalized = {str(col).replace("\ufeff", "").strip().lower(): col for col in columns}
+        aliases = {
+            "tckrsymb": "TckrSymb", "traddt": "TradDt", "opnpric": "OpnPric", "hghpric": "HghPric",
+            "lwpric": "LwPric", "clspric": "ClsPric", "ttltradgvol": "TtlTradgVol",
+            "symbol": "TckrSymb", "series": "Series", "timestamp": "TradDt", "open": "OpnPric",
+            "high": "HghPric", "low": "LwPric", "close": "ClsPric", "tottrdqty": "TtlTradgVol",
+            "tottrdval": "TtlTradgVol",
+        }
+        return {canonical: normalized[key] for key, canonical in aliases.items() if key in normalized}
 
     def _parse(self, payload: bytes, day: date) -> pd.DataFrame:
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
@@ -178,15 +196,21 @@ class NSEHistoricalOHLCVSource:
             with archive.open(names[0]) as handle:
                 raw = pd.read_csv(handle)
         mapping = self._normalize_columns(raw.columns)
-        missing = self.REQUIRED - set(mapping)
+        required = {"TckrSymb", "TradDt", "OpnPric", "HghPric", "LwPric", "ClsPric", "TtlTradgVol"}
+        missing = required - set(mapping)
         if missing:
             raise ValueError(f"NSE bhavcopy missing columns: {sorted(missing)}; received={list(raw.columns)}")
-        return pd.DataFrame({
+        out = pd.DataFrame({
             "symbol": raw[mapping["TckrSymb"]].astype(str).str.strip().str.upper(),
-            "timestamp": pd.to_datetime(raw[mapping["TradDt"]], errors="coerce"),
+            "timestamp": pd.to_datetime(raw[mapping["TradDt"]], errors="coerce", dayfirst=False),
             "open": pd.to_numeric(raw[mapping["OpnPric"]], errors="coerce"),
             "high": pd.to_numeric(raw[mapping["HghPric"]], errors="coerce"),
             "low": pd.to_numeric(raw[mapping["LwPric"]], errors="coerce"),
             "close": pd.to_numeric(raw[mapping["ClsPric"]], errors="coerce"),
             "volume": pd.to_numeric(raw[mapping["TtlTradgVol"]], errors="coerce"),
         }).dropna()
+        series_col = mapping.get("Series")
+        if series_col is not None:
+            series = raw.loc[out.index, series_col].astype(str).str.upper()
+            out = out.loc[series.eq("EQ").to_numpy()]
+        return out
