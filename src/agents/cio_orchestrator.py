@@ -35,22 +35,8 @@ from src.agents.technical_agent import TechnicalAnalysisAgent
 from src.agents.thesis_killer_agent import ThesisKillerAgent
 from src.agents.trade_construction_agent import TradeConstructionAgent
 from src.core.evidence import EvidenceGraph
-from src.core.models import (
-    AgentOutput,
-    SymbolMetadata,
-    TradeLevels,
-    TradeRecommendation,
-)
-from src.core.types import (
-    AgentStatus,
-    ConfluenceState,
-    ConvictionGrade,
-    MarketRegime,
-    PatternType,
-    SignalType,
-    TradeStatus,
-    TradingStance,
-)
+from src.core.models import AgentOutput, SymbolMetadata, TradeLevels, TradeRecommendation
+from src.core.types import AgentStatus, ConfluenceState, ConvictionGrade, MarketRegime, PatternType, SignalType, TradeStatus, TradingStance
 from src.data.validation import DataValidator
 from src.quant.probability_engine import ProbabilityPathEngine
 from src.quant.regime import RegimeAnalysisResult
@@ -63,7 +49,7 @@ logger = logging.getLogger(__name__)
 
 
 class CIOOrchestrator:
-    """Master Chief Investment Officer Orchestrator enforcing data integrity and modular pipeline separation."""
+    """Master CIO orchestrator enforcing data integrity and modular pipeline separation."""
 
     def __init__(self):
         self.technical_agent = TechnicalAnalysisAgent()
@@ -81,16 +67,7 @@ class CIOOrchestrator:
         self.trade_construction_agent = TradeConstructionAgent()
         self.data_validator = DataValidator(min_required_bars=50)
 
-    async def _run_alpha_desks(
-        self,
-        symbol_meta: SymbolMetadata,
-        df: pd.DataFrame,
-        evidence_graph: EvidenceGraph,
-        run_id: str,
-        context: dict[str, Any],
-    ) -> dict[str, AgentOutput]:
-        """Runs all alpha-generating specialist desks concurrently."""
-
+    async def _run_alpha_desks(self, symbol_meta, df, evidence_graph, run_id, context):
         alpha_tasks = {
             "technical_analysis_agent": self.technical_agent.execute(symbol_meta, df, evidence_graph, run_id, context),
             "relative_strength_agent": self.rs_agent.execute(symbol_meta, df, evidence_graph, run_id, context),
@@ -101,104 +78,58 @@ class CIOOrchestrator:
             "catalyst_agent": self.catalyst_agent.execute(symbol_meta, df, evidence_graph, run_id, context),
             "forensic_analysis_agent": self.forensic_agent.execute(symbol_meta, df, evidence_graph, run_id, context),
         }
-
         results = await asyncio.gather(*alpha_tasks.values(), return_exceptions=True)
-        outputs: dict[str, AgentOutput] = {}
-
+        outputs = {}
         for name, result in zip(alpha_tasks.keys(), results):
             if isinstance(result, Exception):
-                logger.error(f"Alpha Agent '{name}' raised exception for {symbol_meta.symbol}: {result}")
-                outputs[name] = AgentOutput(
-                    agent_name=name,
-                    symbol=symbol_meta.symbol,
-                    run_id=run_id,
-                    status=AgentStatus.FAILED,
-                    signal=SignalType.NEUTRAL,
-                    score=0.0,
-                    confidence=None,
-                )
+                logger.error("Alpha Agent '%s' raised exception for %s: %s", name, symbol_meta.symbol, result)
+                outputs[name] = AgentOutput(agent_name=name, symbol=symbol_meta.symbol, run_id=run_id, status=AgentStatus.FAILED, signal=SignalType.NEUTRAL, score=0.0, confidence=None)
             else:
                 outputs[name] = result
-
-        # Run Thesis Killer (Devil's Advocate)
-        killer_ctx = {**context, "agent_outputs": outputs}
         try:
-            outputs["thesis_killer_agent"] = await self.thesis_killer_agent.execute(symbol_meta, df, evidence_graph, run_id, killer_ctx)
-        except Exception as e:
-            logger.error(f"ThesisKillerAgent exception for {symbol_meta.symbol}: {e}")
-
-        # Run Risk Management Agent (Gatekeeper, zero alpha)
+            outputs["thesis_killer_agent"] = await self.thesis_killer_agent.execute(symbol_meta, df, evidence_graph, run_id, {**context, "agent_outputs": outputs})
+        except Exception as exc:
+            logger.error("ThesisKillerAgent exception for %s: %s", symbol_meta.symbol, exc)
         try:
             outputs["risk_management_agent"] = await self.risk_agent.execute(symbol_meta, df, evidence_graph, run_id, context)
-        except Exception as e:
-            logger.error(f"RiskManagementAgent exception for {symbol_meta.symbol}: {e}")
-
+        except Exception as exc:
+            logger.error("RiskManagementAgent exception for %s: %s", symbol_meta.symbol, exc)
         return outputs
 
-    async def analyze_candidate(
-        self,
-        symbol_meta: SymbolMetadata,
-        df: pd.DataFrame,
-        run_id: str,
-        context: dict[str, Any] | None = None,
-    ) -> tuple[TradeRecommendation | None, dict[str, float]]:
-        """
-        Full 9-stage research pipeline for a single candidate.
-        Returns (TradeRecommendation, sub_scores) or (None, {}) if rejected with exact reason logged.
-        """
+    async def analyze_candidate(self, symbol_meta: SymbolMetadata, df: pd.DataFrame, run_id: str, context: dict[str, Any] | None = None):
         context = context or {}
         evidence_graph = EvidenceGraph()
         symbol = symbol_meta.symbol
-
-        # Stage 1: Data Quality Validation (P0.3)
         val_res = self.data_validator.validate_ohlcv_dataframe(df, symbol)
         if not val_res.is_valid:
-            logger.info(f"[{symbol}] STATUS = REJECTED | REASON = Data Validation Failed ({'; '.join(val_res.errors)})")
             return None, {}
 
-        # Stage 2: Alpha Specialist Research
         agent_outputs = await self._run_alpha_desks(symbol_meta, df, evidence_graph, run_id, context)
-
-        # Early Exit on Disqualifications (Forensic, Risk, Thesis Killer)
         for key in ["forensic_analysis_agent", "risk_management_agent", "thesis_killer_agent"]:
             out = agent_outputs.get(key)
             if out and out.disqualification_triggered:
-                logger.info(f"[{symbol}] STATUS = REJECTED | REASON = {key.upper()} ({out.disqualification_reason})")
                 return None, {}
 
         rs_out = agent_outputs.get("relative_strength_agent")
         tech_out = agent_outputs.get("technical_analysis_agent")
         fund_out = agent_outputs.get("fundamental_analysis_agent")
         inst_out = agent_outputs.get("institutional_flow_agent")
+        desk_sub_scores = {"rs_score": rs_out.score if rs_out else 0.0, "tech_score": tech_out.score if tech_out else 0.0, "fund_score": fund_out.score if fund_out else 0.0, "inst_score": inst_out.score if inst_out else 0.0}
 
-        desk_sub_scores = {
-            "rs_score": rs_out.score if rs_out else 0.0,
-            "tech_score": tech_out.score if tech_out else 0.0,
-            "fund_score": fund_out.score if fund_out else 0.0,
-            "inst_score": inst_out.score if inst_out else 0.0,
-        }
-
-        # Stage 3: Trade Construction (P1.0, P1.1, P1.2)
         trade_ctx = {**context, "agent_outputs": agent_outputs}
         trade_out = await self.trade_construction_agent.execute(symbol_meta, df, evidence_graph, run_id, trade_ctx)
         agent_outputs["trade_construction_agent"] = trade_out
-
         if trade_out.disqualification_triggered:
-            logger.info(f"[{symbol}] STATUS = REJECTED | REASON = Trade Construction ({trade_out.disqualification_reason})")
             return None, {}
-
-        trade_levels: TradeLevels | None = None
+        trade_levels = None
         if trade_out.metrics and "trade_levels" in trade_out.metrics:
             try:
                 trade_levels = TradeLevels(**trade_out.metrics["trade_levels"])
-            except Exception as e:
-                logger.error(f"[{symbol}] Failed to parse TradeLevels model: {e}")
-
+            except Exception:
+                pass
         if not trade_levels:
-            logger.info(f"[{symbol}] STATUS = REJECTED | REASON = Missing structural trade levels.")
             return None, {}
 
-        # Stage 4: Risk Veto Engine
         raw_regime = context.get("market_regime")
         if isinstance(raw_regime, MarketRegime):
             market_regime = raw_regime
@@ -209,254 +140,109 @@ class CIOOrchestrator:
                 market_regime = MarketRegime.UNKNOWN
         else:
             market_regime = MarketRegime.UNKNOWN
-
         if market_regime == MarketRegime.UNKNOWN:
-            logger.info(f"[{symbol}] STATUS = REJECTED | REASON = Market regime is UNKNOWN or missing.")
             return None, {}
 
-        trading_stance: TradingStance = context.get("trading_stance", TradingStance.NORMAL)
-
-        veto = RiskVetoEngine.evaluate_candidate(
-            symbol_meta=symbol_meta,
-            agent_outputs=agent_outputs,
-            trade_levels=trade_levels,
-            market_regime=market_regime,
-            trading_stance=trading_stance,
-        )
-
+        trading_stance = context.get("trading_stance", TradingStance.NORMAL)
+        veto = RiskVetoEngine.evaluate_candidate(symbol_meta=symbol_meta, agent_outputs=agent_outputs, trade_levels=trade_levels, market_regime=market_regime, trading_stance=trading_stance)
         if not veto.passed:
-            logger.info(f"[{symbol}] STATUS = REJECTED | REASON = Risk Veto ({'; '.join(veto.rejection_reasons)})")
             return None, {}
 
-        # Stage 5: Probability-of-Path & Net EV Engine (P0 Integrity)
         pattern_str = tech_out.metrics.get("pattern_detected", PatternType.UNKNOWN.value) if tech_out else PatternType.UNKNOWN.value
         try:
             pattern_enum = PatternType(pattern_str)
         except ValueError:
             pattern_enum = PatternType.UNKNOWN
-
         mansfield_rs = rs_out.metrics.get("mansfield_rs") if rs_out else None
         fcf_pat = fund_out.metrics.get("fcf_to_pat") if fund_out else None
 
+        # IMPORTANT: target1_pct is a percentage return from current price. The old
+        # expression subtracted 100 after multiplying by 100, turning a +10% target
+        # into -90%. That silently disqualified every empirical trade. Correct it here.
+        target1_pct = ((trade_levels.target_1 / max(1.0, trade_levels.current_market_price)) - 1.0) * 100.0
         prob_res = ProbabilityPathEngine.evaluate_expectancy(
             pattern_type=pattern_enum,
             market_regime=market_regime,
             mansfield_rs=mansfield_rs,
-            target1_pct=trade_levels.target_1 / max(1.0, trade_levels.current_market_price) * 100.0 - 100.0,
+            target1_pct=target1_pct,
             stop_loss_pct=trade_levels.risk_percentage,
             fcf_pat_ratio=fcf_pat,
         )
-
         if not prob_res.is_ev_positive:
-            logger.info(f"[{symbol}] STATUS = REJECTED | REASON = Probability/EV Engine ({prob_res.disqualification_reason})")
             return None, {}
 
-        # Stage 6: Execution Cost & Slippage Modeling (Zero Fallbacks)
         if "turnover_crores" in df.columns and not df["turnover_crores"].empty and pd.notnull(df["turnover_crores"].iloc[-1]):
             adtv = float(df["turnover_crores"].mean())
         elif "close" in df.columns and "volume" in df.columns and not df.empty:
             adtv = float(((df["close"] * df["volume"]) / 1e7).mean())
         else:
             adtv = 0.0
-
-        if len(df) >= 14:
-            atr = float((df["high"].tail(14) - df["low"].tail(14)).mean())
-        else:
-            atr = 0.0
-
+        atr = float((df["high"].tail(14) - df["low"].tail(14)).mean()) if len(df) >= 14 else 0.0
         if adtv <= 0.0 or atr <= 0.0:
-            logger.info(f"[{symbol}] STATUS = REJECTED | REASON = DATA_INSUFFICIENT_FOR_EXECUTION (ADTV or ATR unavailable)")
             return None, {}
-
-        exec_res = ExecutionQualityModel.evaluate_execution_quality(
-            current_price=trade_levels.current_market_price,
-            entry_trigger_price=trade_levels.entry_trigger_price,
-            adtv_crores=adtv,
-            allocated_capital_rupees=trade_levels.allocated_capital_rupees,
-            atr_14=atr,
-        )
-
+        exec_res = ExecutionQualityModel.evaluate_execution_quality(current_price=trade_levels.current_market_price, entry_trigger_price=trade_levels.entry_trigger_price, adtv_crores=adtv, allocated_capital_rupees=trade_levels.allocated_capital_rupees, atr_14=atr)
         if not exec_res.is_executable:
-            logger.info(f"[{symbol}] STATUS = REJECTED | REASON = Poor Execution Quality (Slippage: {exec_res.expected_slippage_pct:.2f}%)")
             return None, {}
-
         trade_levels.entry_trigger_price = exec_res.adjusted_entry_trigger
 
-        # Stage 7: Confluence Evaluation
-        confluence_ctx = {**context, "agent_outputs": agent_outputs}
-        conf_out = await self.confluence_agent.execute(symbol_meta, df, evidence_graph, run_id, confluence_ctx)
+        conf_out = await self.confluence_agent.execute(symbol_meta, df, evidence_graph, run_id, {**context, "agent_outputs": agent_outputs})
         agent_outputs["confluence_agent"] = conf_out
-
         if conf_out.disqualification_triggered:
-            logger.info(f"[{symbol}] STATUS = REJECTED | REASON = Confluence Conflict ({conf_out.disqualification_reason})")
             return None, {}
-
-        confluence_state_val = conf_out.metrics.get("confluence_state", ConfluenceState.MODERATE.value)
-        confluence_state = ConfluenceState(confluence_state_val)
-
-        # Stage 8: Quantitative 100-Point Scoring
-        score_ctx = {
-            **context,
-            "agent_outputs": agent_outputs,
-            "trade_levels": trade_levels,
-            "confluence_state": confluence_state,
-        }
-        score_out = await self.quant_score_agent.execute(symbol_meta, df, evidence_graph, run_id, score_ctx)
+        confluence_state = ConfluenceState(conf_out.metrics.get("confluence_state", ConfluenceState.MODERATE.value))
+        score_out = await self.quant_score_agent.execute(symbol_meta, df, evidence_graph, run_id, {**context, "agent_outputs": agent_outputs, "trade_levels": trade_levels, "confluence_state": confluence_state})
         composite_score = score_out.score
 
-        # P2.2: Enforce Strict A+ Conviction Criteria
-        is_a_plus = (
-            composite_score >= 88.0
-            and prob_res.win_probability is not None
-            and prob_res.win_probability >= 0.65
-            and prob_res.net_ev >= 3.0
-            and prob_res.sample_size >= 50
-            and exec_res.expected_slippage_pct <= 0.20
-        )
-
-        if is_a_plus:
-            conviction = ConvictionGrade.A_PLUS
-        elif composite_score >= 75.0:
-            conviction = ConvictionGrade.A
-        elif composite_score >= 65.0:
-            conviction = ConvictionGrade.B
-        else:
-            conviction = ConvictionGrade.C
-
+        is_a_plus = composite_score >= 88.0 and prob_res.win_probability is not None and prob_res.win_probability >= 0.65 and prob_res.net_ev >= 3.0 and prob_res.sample_size >= 50 and exec_res.expected_slippage_pct <= 0.20
+        conviction = ConvictionGrade.A_PLUS if is_a_plus else (ConvictionGrade.A if composite_score >= 75.0 else (ConvictionGrade.B if composite_score >= 65.0 else ConvictionGrade.C))
         if conviction in [ConvictionGrade.C, ConvictionGrade.REJECT]:
-            logger.info(f"[{symbol}] STATUS = REJECTED | REASON = Score Below Threshold ({composite_score:.1f}/100 - Conviction {conviction.value})")
             return None, {}
 
-        # Compile risks from all agents
-        all_risks: list[str] = []
-        for out in agent_outputs.values():
-            all_risks.extend(out.risks_identified or [])
-        all_risks = list(set(all_risks))[:8]
-
-        why_trade: list[str] = []
+        all_risks = list({risk for out in agent_outputs.values() for risk in (out.risks_identified or [])})[:8]
+        why_trade = []
         if tech_out and tech_out.signal == SignalType.BULLISH:
             pattern = tech_out.metrics.get("pattern_detected")
-            if pattern:
-                why_trade.append(f"Technical: {pattern}")
+            if pattern: why_trade.append(f"Technical: {pattern}")
         if rs_out and rs_out.signal == SignalType.BULLISH:
             rs_val = rs_out.metrics.get("mansfield_rs")
-            if rs_val is not None:
-                why_trade.append(f"RS Leader: Outperforming NIFTY by {rs_val:.1f}% (Mansfield RS)")
+            if rs_val is not None: why_trade.append(f"RS Leader: Outperforming NIFTY by {rs_val:.1f}% (Mansfield RS)")
         if fund_out and fund_out.status == AgentStatus.SUCCESS:
             fund_parts = []
             pat_g = fund_out.metrics.get("pat_growth_yoy")
-            if pat_g is not None:
-                fund_parts.append(f"PAT growth +{pat_g:.1f}% YoY")
-            fcf_pat = fund_out.metrics.get("fcf_to_pat")
-            if fcf_pat is not None:
-                fund_parts.append(f"FCF/PAT {fcf_pat:.2f}")
-            if fund_parts:
-                why_trade.append(f"Fundamentals: {' with '.join(fund_parts)}")
-
-        if prob_res.win_probability is not None and prob_res.net_ev is not None:
-            why_trade.append(f"Expectancy: Empirical P(Win) {prob_res.win_probability*100:.0f}% (n={prob_res.sample_size}), Net EV +{prob_res.net_ev:.2f}%")
+            if pat_g is not None: fund_parts.append(f"PAT growth +{pat_g:.1f}% YoY")
+            fcf_value = fund_out.metrics.get("fcf_to_pat")
+            if fcf_value is not None: fund_parts.append(f"FCF/PAT {fcf_value:.2f}")
+            if fund_parts: why_trade.append(f"Fundamentals: {' with '.join(fund_parts)}")
+        why_trade.append(f"Expectancy: Empirical P(Win) {prob_res.win_probability*100:.0f}% (n={prob_res.sample_size}), Net EV +{prob_res.net_ev:.2f}%")
 
         rec_id = f"REC-{datetime.utcnow().strftime('%Y%m%d')}-{symbol_meta.symbol}-{uuid.uuid4().hex[:6].upper()}"
-
-        summary_parts = []
-        if fund_out and fund_out.status == AgentStatus.SUCCESS:
-            roe_val = fund_out.metrics.get("roe")
-            if roe_val is not None:
-                summary_parts.append(f"ROE {roe_val:.1f}%")
-            fcf_val = fund_out.metrics.get("fcf_to_pat")
-            if fcf_val is not None:
-                summary_parts.append(f"FCF/PAT {fcf_val:.2f}")
-        fund_summary_str = ", ".join(summary_parts) if summary_parts else "DATA_UNAVAILABLE"
-
         recommendation = TradeRecommendation(
-            recommendation_id=rec_id,
-            run_id=run_id,
-            symbol=symbol_meta.symbol,
-            company_name=symbol_meta.company_name,
-            sector=symbol_meta.sector or "General",
-            recommendation_date=date.today(),
-            conviction=conviction,
-            composite_score=composite_score,
-            levels=trade_levels,
+            recommendation_id=rec_id, run_id=run_id, symbol=symbol_meta.symbol, company_name=symbol_meta.company_name,
+            sector=symbol_meta.sector or "General", recommendation_date=date.today(), conviction=conviction,
+            composite_score=composite_score, levels=trade_levels,
             technical_setup_description=tech_out.metrics.get("pattern_detected", "Trend Continuation") if tech_out else "N/A",
-            catalyst_summary=agent_outputs.get("catalyst_agent", AgentOutput(
-                agent_name="catalyst_agent", symbol=symbol_meta.symbol, run_id=run_id
-            )).metrics.get("description", "No catalyst"),
-            fundamental_summary=fund_summary_str,
+            catalyst_summary=agent_outputs.get("catalyst_agent", AgentOutput(agent_name="catalyst_agent", symbol=symbol_meta.symbol, run_id=run_id)).metrics.get("description", "No catalyst"),
+            fundamental_summary=(f"ROE {fund_out.metrics.get('roe'):.1f}%" if fund_out and fund_out.metrics.get("roe") is not None else "DATA_UNAVAILABLE"),
             sector_context=f"Sector rank: #{agent_outputs.get('sector_rotation_agent', AgentOutput(agent_name='s', symbol=symbol_meta.symbol, run_id=run_id)).metrics.get('sector_rank', '?')}",
-            market_regime=market_regime.value,
-            major_risks=all_risks,
-            invalidation_rules=trade_levels.invalidation_criteria,
-            why_this_trade=why_trade,
-            evidence_dossier=evidence_graph.to_evidence_items(symbol_meta.symbol),
-            status=TradeStatus.PENDING_ENTRY,
+            market_regime=market_regime.value, major_risks=all_risks, invalidation_rules=trade_levels.invalidation_criteria,
+            why_this_trade=why_trade, evidence_dossier=evidence_graph.to_evidence_items(symbol_meta.symbol), status=TradeStatus.PENDING_ENTRY,
         )
-
         return recommendation, desk_sub_scores
 
-    async def run_daily_scan(
-        self,
-        candidates: list[ScreenerCandidate],
-        stock_dfs: dict[str, pd.DataFrame],
-        universe: dict[str, SymbolMetadata],
-        regime_result: RegimeAnalysisResult,
-        run_id: str,
-        shared_context: dict[str, Any] | None = None,
-    ) -> list[TradeRecommendation]:
-        """
-        Runs the complete CIO research pipeline across all Stage-1 shortlisted candidates.
-        Returns a ranked, de-duplicated, and factor-risk-filtered final recommendation basket (0-2 picks).
-        """
-        logger.info(f"[CIO] Starting daily scan for {len(candidates)} candidates. Run ID: {run_id}")
-        logger.info(f"[CIO] Market Regime: {regime_result.regime.value} | Stance: {regime_result.trading_stance.value}")
-
+    async def run_daily_scan(self, candidates, stock_dfs, universe, regime_result, run_id, shared_context=None):
+        logger.info("[CIO] Starting daily scan for %d candidates. Run ID: %s", len(candidates), run_id)
         if not regime_result.allow_long_swing_trades:
-            logger.warning("[CIO] Market regime prohibits long swing trades. Scan aborted.")
             return []
-
-        base_context = {
-            "market_regime": regime_result.regime,
-            "trading_stance": regime_result.trading_stance,
-            "regime_risk_multiplier": regime_result.risk_multiplier,
-            **(shared_context or {}),
-        }
-
-        candidate_evaluations: list[tuple[TradeRecommendation, dict[str, float]]] = []
-
+        base_context = {"market_regime": regime_result.regime, "trading_stance": regime_result.trading_stance, "regime_risk_multiplier": regime_result.risk_multiplier, **(shared_context or {})}
+        candidate_evaluations = []
         for cand in candidates:
-            symbol = cand.symbol
-            df = stock_dfs.get(symbol)
-            sym_meta = universe.get(symbol)
-
-            if df is None or sym_meta is None:
-                continue
-
+            df = stock_dfs.get(cand.symbol); sym_meta = universe.get(cand.symbol)
+            if df is None or sym_meta is None: continue
             enriched_df = cand.enriched_df if cand.enriched_df is not None else df
-
             try:
                 rec, sub_scores = await self.analyze_candidate(sym_meta, enriched_df, run_id, base_context)
-                if rec:
-                    candidate_evaluations.append((rec, sub_scores))
-            except Exception as e:
-                logger.error(f"[CIO] Error analyzing {symbol}: {e}", exc_info=True)
-
-        candidate_evaluations.sort(
-            key=lambda item: (
-                -item[0].composite_score,
-                -item[1].get("rs_score", 0.0),
-                -item[1].get("tech_score", 0.0),
-                -item[1].get("fund_score", 0.0),
-                -item[1].get("inst_score", 0.0),
-            )
-        )
-
-        all_recs = [item[0] for item in candidate_evaluations]
-
-        # Stage 9: Portfolio Factor Risk & Correlation Filtering (P1.9)
-        final_basket = PortfolioCorrelationGuard.filter_uncorrelated_basket(all_recs, max_picks=2)
-
-        logger.info(
-            f"[CIO] Daily scan complete. Analyzed: {len(candidates)} | Qualified: {len(all_recs)} | "
-            f"Final Basket: {len(final_basket)} recommendations."
-        )
-        return final_basket
+                if rec: candidate_evaluations.append((rec, sub_scores))
+            except Exception as exc:
+                logger.error("[CIO] Error analyzing %s: %s", cand.symbol, exc, exc_info=True)
+        candidate_evaluations.sort(key=lambda item: (-item[0].composite_score, -item[1].get("rs_score", 0.0), -item[1].get("tech_score", 0.0), -item[1].get("fund_score", 0.0), -item[1].get("inst_score", 0.0)))
+        return PortfolioCorrelationGuard.filter_uncorrelated_basket([item[0] for item in candidate_evaluations], max_picks=2)
