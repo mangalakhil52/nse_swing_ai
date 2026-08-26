@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """Research candidate setups without promoting them to live signals."""
 from __future__ import annotations
-import argparse, json
+import argparse, json, sys
 from pathlib import Path
 import pandas as pd
+
+# Allow this script to be executed directly by GitHub Actions from repository root.
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 from scripts.build_empirical_outcomes import process_symbol
 
 
