@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""Daily EOD scan using the complete official NSE equity universe."""
+"""Daily EOD scan using the complete official NSE equity universe.
+
+Pipeline:
+  dynamic NSE universe -> official EOD data -> cheap liquidity/price gate
+  -> full historical technical screen -> top 100 -> specialist CIO research
+  -> strict risk/EV/conviction gates -> top 0-3 recommendations.
+
+No hardcoded stock list and no synthetic market-data fallback are permitted.
+"""
 
 import argparse
 import asyncio
@@ -18,14 +26,18 @@ except Exception:
     pass
 
 from config.market_hours import get_latest_trading_day
+from config.settings import settings
 from src.agents.cio_orchestrator import CIOOrchestrator
+from src.core.exceptions import DataUnavailableException
 from src.core.models import SymbolMetadata
 from src.data.historical_provider import HistoricalDataProvider
 from src.data.nse_provider import NseDataProvider
+from src.data.upstox_provider import UpstoxDataProvider
 from src.database.connection import init_db
 from src.quant.regime import MarketRegimeClassifier
 from src.quant.screener import QuantScreener
 from src.shadow.alerts import TelegramFormatter
+from web.api_contract import BUS
 
 logging.basicConfig(
     level=logging.INFO,
@@ -33,6 +45,12 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger("run_daily_scan")
+
+
+async def _load_history(symbol: str, start: date, end: date, upstox: UpstoxDataProvider | None, hist: HistoricalDataProvider) -> pd.DataFrame:
+    if upstox is not None:
+        return await upstox.get_daily_ohlcv(symbol, start, end)
+    return await hist.get_daily_ohlcv(symbol, start, end, min_bars=50)
 
 
 def parse_args() -> argparse.Namespace:
@@ -46,35 +64,52 @@ def parse_args() -> argparse.Namespace:
 async def run_scan(scan_date: date, dry_run: bool = False, force: bool = False) -> int:
     run_id = f"SCAN-{scan_date:%Y%m%d}-{uuid.uuid4().hex[:8].upper()}"
     logger.info("NSE SWING AI scan started | run=%s | date=%s", run_id, scan_date)
+    BUS.publish({"type": "connection", "connected": True})
+    BUS.publish({"type": "scan_progress", "universe": 0, "filtered": 0, "candidates": 0, "intel": 0, "final": 0, "processed": 0, "status": "STARTING"})
     init_db()
 
     nse_provider = NseDataProvider()
+    upstox: UpstoxDataProvider | None = None
+    hist_provider: HistoricalDataProvider | None = None
     try:
-        # The only live-universe source is NSE's official EQUITY_L security master.
-        universe_meta = await nse_provider.fetch_active_securities()
-        if not universe_meta:
-            logger.error("DATA_UNAVAILABLE: NSE equity master unavailable; refusing partial-universe scan")
-            return 1
-        logger.info("Official NSE equity universe: %d symbols", len(universe_meta))
+        if settings.UPSTOX_ENABLED and settings.UPSTOX_ACCESS_TOKEN:
+            upstox = UpstoxDataProvider()
+            universe_meta = await upstox.fetch_active_securities()
+            logger.info("Upstox dynamic NSE equity universe: %d symbols", len(universe_meta))
+        else:
+            universe_meta = await nse_provider.fetch_active_securities()
+            logger.info("Official NSE equity universe: %d symbols", len(universe_meta))
 
+        if not universe_meta:
+            raise DataUnavailableException("DATA_UNAVAILABLE: dynamic NSE equity master is empty")
+        BUS.publish({"type": "scan_progress", "universe": len(universe_meta), "processed": 0, "status": "UNIVERSE_LOADED"})
+
+        # EOD bhavcopy is the authoritative exchange-wide snapshot and supplies
+        # liquidity/price gates without making one API request per stock.
         bhavcopy_df = await nse_provider.fetch_bhavcopy_for_date(scan_date)
         if bhavcopy_df.empty:
-            logger.error("DATA_UNAVAILABLE: empty NSE Bhavcopy for %s", scan_date)
-            return 1
+            raise DataUnavailableException(f"DATA_UNAVAILABLE: empty NSE Bhavcopy for {scan_date}")
         logger.info("Bhavcopy loaded: %d records", len(bhavcopy_df))
 
         hist_provider = HistoricalDataProvider()
-        start_history_date = scan_date - timedelta(days=120)
+        start_history_date = scan_date - timedelta(days=420)
+
+        # Market regime is computed from genuine NIFTY history when available.
         nifty_df = pd.DataFrame()
         try:
-            nifty_df = await hist_provider.get_daily_ohlcv("NIFTY 50", start_history_date, scan_date, min_bars=50)
+            if upstox is not None:
+                nifty_df = await upstox.get_index_daily_ohlcv("NIFTY 50", start_history_date, scan_date)
+            else:
+                nifty_df = await hist_provider.get_daily_ohlcv("NIFTY 50", start_history_date, scan_date, min_bars=50)
         except Exception as exc:
             logger.warning("NIFTY 50 data unavailable: %s", exc)
 
         regime_result = MarketRegimeClassifier.classify_regime(nifty_df=nifty_df)
         logger.info("Regime=%s | stance=%s", regime_result.regime.value, regime_result.trading_stance.value)
+        BUS.publish({"type": "alert", "severity": "green", "message": f"Market regime: {regime_result.regime.value}"})
         if not regime_result.allow_long_swing_trades:
             logger.warning("Regime prohibits long swing trades; returning zero recommendations")
+            BUS.publish({"type": "scan_progress", "processed": 0, "status": "NO_TRADE_REGIME"})
             return 0
 
         screener = QuantScreener(min_adtv_crores=5.0, min_price=20.0)
@@ -83,7 +118,6 @@ async def run_scan(scan_date: date, dry_run: bool = False, force: bool = False) 
         bhav_symbols = set(bhavcopy_df["_symbol"])
         candidate_meta = [m for m in universe_meta if m.symbol.upper() in bhav_symbols]
 
-        # Cheap EOD pre-filter only; full historical screener remains authoritative.
         filtered_meta: list[SymbolMetadata] = []
         for meta in candidate_meta:
             row = bhav_by_symbol.loc[meta.symbol.upper()]
@@ -96,21 +130,38 @@ async def run_scan(scan_date: date, dry_run: bool = False, force: bool = False) 
                 filtered_meta.append(meta)
 
         logger.info("Bhavcopy pre-filter: %d candidates", len(filtered_meta))
+        BUS.publish({"type": "scan_progress", "filtered": len(filtered_meta), "processed": 0, "status": "LIQUIDITY_FILTER"})
 
         stock_dfs: dict[str, pd.DataFrame] = {}
         eligible_meta: list[SymbolMetadata] = []
-        for meta in filtered_meta:
-            try:
-                df_hist = await hist_provider.get_daily_ohlcv(meta.symbol, start_history_date, scan_date, min_bars=50)
-                if df_hist is not None and not df_hist.empty:
-                    stock_dfs[meta.symbol] = df_hist
-                    eligible_meta.append(meta)
-            except Exception as exc:
-                logger.debug("Skipping %s: %s", meta.symbol, exc)
+        semaphore = asyncio.Semaphore(12)
+
+        async def fetch_one(meta: SymbolMetadata):
+            async with semaphore:
+                try:
+                    df_hist = await _load_history(meta.symbol, start_history_date, scan_date, upstox, hist_provider)
+                    if df_hist is not None and not df_hist.empty:
+                        return meta, df_hist
+                except Exception as exc:
+                    logger.debug("Skipping %s: %s", meta.symbol, exc)
+                return meta, None
+
+        results = await asyncio.gather(*(fetch_one(meta) for meta in filtered_meta))
+        for meta, df_hist in results:
+            if df_hist is not None:
+                stock_dfs[meta.symbol] = df_hist
+                eligible_meta.append(meta)
+        logger.info("Historical data loaded: %d/%d symbols", len(eligible_meta), len(filtered_meta))
+        BUS.publish({"type": "scan_progress", "processed": len(eligible_meta), "status": "HISTORY_LOADED"})
 
         candidates = screener.screen_universe(eligible_meta, stock_dfs, nifty_df)
-        logger.info("Final Stage-1 candidates: %d", len(candidates))
+        # The specialist layer is deliberately capped at 100; this keeps the
+        # expensive research stage deterministic and within operational limits.
+        candidates = candidates[:100]
+        logger.info("Final Stage-1 candidates passed to CIO: %d", len(candidates))
+        BUS.publish({"type": "scan_progress", "candidates": len(candidates), "processed": len(eligible_meta), "status": "TECHNICAL_SCREEN_COMPLETE"})
         if not candidates:
+            BUS.publish({"type": "scan_progress", "final": 0, "status": "NO_TRADE"})
             return 0
 
         cio = CIOOrchestrator()
@@ -122,13 +173,33 @@ async def run_scan(scan_date: date, dry_run: bool = False, force: bool = False) 
             run_id=run_id,
         )
         logger.info("Scan complete: %d recommendations", len(recommendations))
+        BUS.publish({"type": "scan_progress", "intel": len(candidates), "final": len(recommendations), "processed": len(eligible_meta), "status": "COMPLETE" if recommendations else "NO_TRADE"})
 
         if recommendations:
+            for rec in recommendations:
+                BUS.publish({
+                    "type": "agent", "agent": "CIO FUSION", "status": "PASS", "progress": 100,
+                    "processed": len(candidates), "decision": getattr(rec, "conviction_grade", "TRADE"),
+                    "log": [f"{rec.symbol}: final recommendation", f"Entry {rec.trade_levels.entry_trigger_price:.2f}", f"T1 {rec.trade_levels.target_1:.2f}", f"SL {rec.trade_levels.stop_loss_price:.2f}"],
+                })
             summary = TelegramFormatter.format_scan_summary(recommendations, regime_result.regime.value)
             logger.info("Telegram Summary Output:\n%s", summary)
         return 0
+    except DataUnavailableException as exc:
+        logger.error("%s", exc)
+        BUS.publish({"type": "alert", "severity": "red", "message": str(exc)})
+        BUS.publish({"type": "scan_progress", "status": "DATA_UNAVAILABLE"})
+        return 1
+    except Exception as exc:
+        logger.exception("Scan failed")
+        BUS.publish({"type": "alert", "severity": "red", "message": f"Backend failure: {exc}"})
+        BUS.publish({"type": "scan_progress", "status": "FAILED"})
+        return 1
     finally:
         await nse_provider.close()
+        if upstox is not None:
+            await upstox.close()
+        BUS.publish({"type": "connection", "connected": False})
 
 
 def main() -> None:
