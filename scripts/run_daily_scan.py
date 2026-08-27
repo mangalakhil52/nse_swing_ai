@@ -15,6 +15,7 @@ from config.market_hours import get_latest_trading_day, is_trading_day
 from src.agents.cio_orchestrator import CIOOrchestrator
 from src.core.exceptions import DataUnavailableException
 from src.data.bulk_history import BulkHistoricalLoader
+from src.data.nse_index_provider import NseIndexDataProvider
 from src.data.nse_provider import NseDataProvider
 from src.database.connection import init_db
 from src.quant.regime import MarketRegimeClassifier
@@ -48,18 +49,17 @@ async def run_scan(scan_date: date, dry_run: bool = False, force: bool = False) 
         return 0
 
     nse_provider = NseDataProvider()
+    index_provider = NseIndexDataProvider()
     bulk_loader = BulkHistoricalLoader(nse_provider)
     try:
         universe_meta = await nse_provider.fetch_active_securities()
         if not universe_meta:
-            logger.error("DATA_UNAVAILABLE: NSE equity master unavailable; refusing partial-universe scan")
-            return 1
+            raise DataUnavailableException("NSE equity master unavailable; refusing partial-universe scan")
         logger.info("Official NSE equity universe: %d symbols", len(universe_meta))
 
         bhavcopy_df = await nse_provider.fetch_bhavcopy_for_date(scan_date)
         if bhavcopy_df.empty:
-            logger.error("DATA_UNAVAILABLE: empty NSE Bhavcopy for %s", scan_date)
-            return 1
+            raise DataUnavailableException(f"Empty NSE Bhavcopy for {scan_date}")
 
         # Cheap same-day gate before historical loading.
         bhavcopy_df["_symbol"] = bhavcopy_df["symbol"].astype(str).str.strip().str.upper()
@@ -88,9 +88,8 @@ async def run_scan(scan_date: date, dry_run: bool = False, force: bool = False) 
         eligible_meta = [m for m in filtered_meta if m.symbol in stock_dfs]
         logger.info("Historical PIT data available for %d symbols", len(eligible_meta))
 
-        # Official NSE benchmark and volatility observations.
-        nifty_df = await nse_provider.get_index_history("NIFTY 50", start_history_date, scan_date)
-        vix_df = await nse_provider.get_india_vix_history(start_history_date, scan_date)
+        nifty_df = await index_provider.get_index_history("NIFTY 50", start_history_date, scan_date)
+        vix_df = await index_provider.get_india_vix_history(start_history_date, scan_date)
         if len(nifty_df) < 200:
             raise DataUnavailableException(f"NIFTY 50 history insufficient: {len(nifty_df)} bars < 200")
 
@@ -147,6 +146,7 @@ async def run_scan(scan_date: date, dry_run: bool = False, force: bool = False) 
         return 1
     finally:
         await bulk_loader.close()
+        await index_provider.close()
 
 
 def main() -> None:
