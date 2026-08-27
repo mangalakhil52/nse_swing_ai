@@ -72,8 +72,8 @@ async def execute_daily_5pm_cycle(target_date: date | None = None, force: bool =
         if bhavcopy_df.empty:
             raise DataUnavailableException(f"Bhavcopy unavailable for {target_date}")
 
-        # Same-day liquidity gate reduces the historical universe before the
-        # batch loader performs its one-request-per-day exchange downloads.
+        # Same-day gate determines which stocks enter the specialist pipeline.
+        # It does NOT define market breadth: breadth remains whole-universe.
         bhavcopy_df["_symbol"] = bhavcopy_df["symbol"].astype(str).str.strip().str.upper()
         by_symbol = bhavcopy_df.set_index("_symbol")
         candidate_meta = []
@@ -91,12 +91,13 @@ async def execute_daily_5pm_cycle(target_date: date | None = None, force: bool =
 
         start_history_date = target_date - timedelta(days=400)
         stock_dfs = await bulk_loader.load(
-            [m.symbol for m in candidate_meta],
+            [m.symbol for m in universe_meta],
             start_history_date,
             target_date,
             min_bars=100,
         )
         eligible_meta = [m for m in candidate_meta if m.symbol in stock_dfs]
+        logger.info("Historical PIT data available for %d/%d NSE symbols", len(stock_dfs), len(universe_meta))
 
         nifty_df = await index_provider.get_index_history("NIFTY 50", start_history_date, target_date)
         if len(nifty_df) < 200:
@@ -123,8 +124,9 @@ async def execute_daily_5pm_cycle(target_date: date | None = None, force: bool =
             logger.warning("Regime blocks long swing trades; NO TRADE TODAY")
             return 0
 
+        candidate_dfs = {m.symbol: stock_dfs[m.symbol] for m in eligible_meta if m.symbol in stock_dfs}
         screener = QuantScreener(min_adtv_crores=5.0, min_price=20.0)
-        candidates = screener.screen_universe(eligible_meta, stock_dfs, nifty_df)
+        candidates = screener.screen_universe(eligible_meta, candidate_dfs, nifty_df)
         logger.info("Stage-1 candidates: %d", len(candidates))
         if not candidates:
             logger.info("NO TRADE TODAY: Stage-1 produced no candidates")
@@ -133,8 +135,8 @@ async def execute_daily_5pm_cycle(target_date: date | None = None, force: bool =
         cio = CIOOrchestrator()
         recommendations = await cio.run_daily_scan(
             candidates=candidates,
-            stock_dfs=stock_dfs,
-            universe=universe_dict,
+            stock_dfs=candidate_dfs,
+            universe={m.symbol: m for m in eligible_meta},
             regime_result=regime_result,
             run_id=run_id,
         )
