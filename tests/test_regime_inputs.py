@@ -13,8 +13,8 @@ def _series(closes):
 def test_compute_breadth_is_point_in_time_and_deterministic():
     up = _series([100] * 50 + [101])
     down = _series([100] * 50 + [99])
-    result = compute_breadth({"UP": up, "DOWN": down}, "2026-02-21")
-    assert result == (1.0, 100.0)
+    result = compute_breadth({"UP": up, "DOWN": down}, "2026-02-20")
+    assert result == (1.0, 50.0)
 
 
 def test_latest_vix_uses_as_of_boundary():
