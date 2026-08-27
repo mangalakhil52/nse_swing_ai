@@ -1,125 +1,149 @@
 """
 Dynamic NSE Universe Discovery & Security Master Module.
 Builds the canonical eligible trading universe from official exchange listings.
-Filters out delisted, suspended, SME illiquid securities, penny stocks (< ₹20), and securities under SEBI ASM/GSM stage >= 2.
+
+Production invariants:
+- The live universe is sourced from the NSE security master, never a hardcoded
+  stock list.
+- A failed refresh never silently degrades to a partial F&O-only universe.
+- Cached security masters are bounded by a configurable TTL.
+- Only active equity series are retained and ASM/GSM stage >= 2 is excluded.
 """
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from config.settings import settings
+from src.core.exceptions import DataUnavailableException
 from src.core.models import SymbolMetadata
 from src.data.base import MarketDataProvider
 
 logger = logging.getLogger(__name__)
 
-# Standard NSE F&O Key Constituents Reference List (Active Derivatives Basket)
-STANDARD_FNO_SYMBOLS = {
-    "AARTIIND", "ABB", "ABBOTINDIA", "ABCAPITAL", "ABFRL", "ACC", "ADANIENT", "ADANIPORTS",
-    "ALKEM", "AMBUJACEM", "APOLLOHOSP", "APOLLOTYRE", "ASHOKLEY", "ASIANPAINT", "ASTRAL",
-    "ATUL", "AUBANK", "AUROPHARMA", "AXISBANK", "BAJAJ-AUTO", "BAJAJFINSV", "BAJFINANCE",
-    "BALKRISIND", "BALRAMCHIN", "BANDHANBNK", "BANKBARODA", "BATAINDIA", "BEL", "BERGEPAINT",
-    "BHARATFORG", "BHARTIARTL", "BHEL", "BIOCON", "BOSCHLTD", "BPCL", "BRITANNIA", "BSOFT",
-    "CANBK", "CANFINHOME", "CHAMBLFERT", "CHOLAFIN", "CIPLA", "COALINDIA", "COFORGE", "COLPAL",
-    "CONCOR", "COROMANDEL", "CROMPTON", "CUB", "CUMMINSIND", "DABUR", "DALBHARAT", "DEEPAKNTR",
-    "DELHIVERY", "DIVISLAB", "DIXON", "DLF", "DRREDDY", "EICHERMOT", "ESCORTS", "EXIDEIND",
-    "FEDERALBNK", "GAIL", "GLENMARK", "GMRINFRA", "GNFC", "GODREJCP", "GODREJPROP", "GRANULES",
-    "GRASIM", "GUJGASLTD", "HAL", "HAVELLS", "HCLTECH", "HDFCAMC", "HDFCBANK", "HDFCLIFE",
-    "HEROMOTOCO", "HINDALCO", "HINDCOPPER", "HINDPETRO", "HINDUNILVR", "ICICIBANK", "ICICIGI",
-    "ICICIPRULI", "IDEA", "IDFCFIRSTB", "IEX", "IGL", "INDHOTEL", "INDIACEM", "INDIAMART",
-    "INDIGO", "INDUSINDBK", "INDUSTOWER", "INFY", "IOC", "IPCALAB", "IRCTC", "ITC",
-    "JINDALSTEL", "JKCEMENT", "JSWSTEEL", "JUBLFOOD", "KOTAKBANK", "LALPATHLAB", "LAURUSLABS",
-    "LICHSGFIN", "LT", "LTIM", "LTTS", "LUPIN", "M&M", "M&MFIN", "MANAPPURAM", "MARICO",
-    "MARUTI", "MCDOWELL-N", "MCX", "METROPOLIS", "MFSL", "MGL", "MOTHERSON", "MPHASIS",
-    "MRF", "MUTHOOTFIN", "NATIONALUM", "NAUKRI", "NAVINFLUOR", "NESTLEIND", "NMDC", "NTPC",
-    "OBEROIRLTY", "OFSS", "ONGC", "PAGEIND", "PEL", "PERSISTENT", "PETRONET", "PFC",
-    "PIDILITIND", "PIIND", "PNB", "POLYCAB", "POONAWALLA", "POWERGRID", "PVRINOX", "RAMCOCEM",
-    "RBLBANK", "RECLTD", "RELIANCE", "SAIL", "SBICARD", "SBILIFE", "SBIN", "SHREECEM",
-    "SIEMENS", "SRF", "SUNPHARMA", "SUNTV", "SYNGENE", "TATACHEM", "TATACOMM", "TATACONSUM",
-    "TATAMOTORS", "TATAPOWER", "TATASTEEL", "TCS", "TECHM", "TITAN", "TORNTPHARM", "TORNTPOWER",
-    "TRENT", "TVSMOTOR", "UBL", "ULTRACEMCO", "UPL", "VEDL", "VOLTAS", "WIPRO", "ZYDUSLIFE"
-}
-
 
 class UniverseDiscoveryEngine:
-    """Discovers, updates, and manages canonical NSE Equity Universe."""
+    """Discovers and manages the canonical NSE equity universe."""
 
     def __init__(self, market_data_provider: MarketDataProvider, cache_dir: Path | None = None):
         self.provider = market_data_provider
         self.cache_dir = cache_dir or settings.CACHE_DIR / "universe"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.security_master_file = self.cache_dir / "canonical_security_master.json"
+        self.cache_ttl_hours = 24
+
+    def _cache_is_fresh(self) -> bool:
+        if not self.security_master_file.exists():
+            return False
+        try:
+            payload = json.loads(self.security_master_file.read_text(encoding="utf-8"))
+            updated_at = payload.get("updated_at")
+            if not updated_at:
+                return False
+            ts = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            return datetime.now(timezone.utc) - ts <= timedelta(hours=self.cache_ttl_hours)
+        except Exception:
+            return False
+
+    def _load_cached_universe(self) -> list[SymbolMetadata]:
+        try:
+            data = json.loads(self.security_master_file.read_text(encoding="utf-8"))
+            securities = data.get("securities", [])
+            if not securities:
+                raise DataUnavailableException("Cached NSE security master is empty")
+            universe = [SymbolMetadata(**item) for item in securities]
+            if not universe:
+                raise DataUnavailableException("Cached NSE security master contains no securities")
+            return universe
+        except Exception as exc:
+            raise DataUnavailableException(f"Invalid NSE security-master cache: {exc}") from exc
 
     async def build_universe(self, force_refresh: bool = False) -> list[SymbolMetadata]:
         """
-        Builds the active eligible NSE equity universe.
-        Applies ASM/GSM filters, F&O tagging, and deduplication.
+        Build the active NSE equity universe from the official security master.
+
+        Fail-closed behavior is intentional: if the exchange listing cannot be
+        refreshed and no valid cache exists, the scan must stop rather than trade
+        against a stale/partial universe.
         """
-        if not force_refresh and self.security_master_file.exists():
-            try:
-                data = json.loads(self.security_master_file.read_text(encoding="utf-8"))
-                symbols_data = data.get("securities", [])
-                if symbols_data:
-                    logger.info(f"Loaded {len(symbols_data)} active securities from canonical security master.")
-                    return [SymbolMetadata(**s) for s in symbols_data]
-            except Exception as e:
-                logger.warning(f"Failed to read cached universe: {e}")
+        if not force_refresh and self._cache_is_fresh():
+            universe = self._load_cached_universe()
+            logger.info("Loaded %d active securities from fresh canonical security master.", len(universe))
+            return universe
 
-        # Fetch active listing from exchange
-        raw_securities = await self.provider.fetch_active_securities()
+        raw_securities: list[SymbolMetadata] = []
+        try:
+            raw_securities = await self.provider.fetch_active_securities()
+        except Exception as exc:
+            logger.warning("NSE security-master refresh failed: %s", exc)
+
         if not raw_securities:
-            logger.warning("Provider returned empty active securities list. Using standard F&O baseline.")
-            raw_securities = [
-                SymbolMetadata(
-                    symbol=sym,
-                    company_name=sym,
-                    exchange="NSE",
-                    is_active=True,
-                    is_fno_eligible=True,
+            # A stale cache can be used only as an explicit availability fallback;
+            # never replace it with a fabricated or partial symbol list.
+            if self.security_master_file.exists():
+                universe = self._load_cached_universe()
+                logger.warning(
+                    "Using stale canonical security master with %d securities because NSE refresh failed. "
+                    "No hardcoded F&O fallback is permitted.",
+                    len(universe),
                 )
-                for sym in sorted(STANDARD_FNO_SYMBOLS)
-            ]
+                return universe
+            raise DataUnavailableException(
+                "NSE active-equity security master unavailable and no valid cache exists; refusing partial-universe scan."
+            )
 
-        # Process and tag F&O / ASM status
         eligible_universe: list[SymbolMetadata] = []
+        seen: set[str] = set()
         for sec in raw_securities:
             sym_upper = sec.symbol.upper().strip()
-
-            # Skip symbols with ASM/GSM stage >= 2
+            if not sym_upper or sym_upper in seen:
+                continue
+            if not sec.is_active:
+                continue
             if sec.asm_gsm_stage >= 2:
-                logger.debug(f"Excluding {sym_upper} due to ASM/GSM stage {sec.asm_gsm_stage}")
+                logger.debug("Excluding %s due to ASM/GSM stage %s", sym_upper, sec.asm_gsm_stage)
                 continue
 
-            # Tag F&O eligibility
-            is_fno = sym_upper in STANDARD_FNO_SYMBOLS or sec.is_fno_eligible
-
-            enriched_sec = SymbolMetadata(
-                symbol=sym_upper,
-                company_name=sec.company_name,
-                isin=sec.isin,
-                exchange="NSE",
-                sector=sec.sector or "General",
-                industry=sec.industry or "General",
-                is_fno_eligible=is_fno,
-                is_active=sec.is_active,
-                asm_gsm_stage=sec.asm_gsm_stage,
-                lot_size=sec.lot_size,
+            seen.add(sym_upper)
+            eligible_universe.append(
+                SymbolMetadata(
+                    symbol=sym_upper,
+                    company_name=sec.company_name,
+                    isin=sec.isin,
+                    exchange="NSE",
+                    sector=sec.sector or "General",
+                    industry=sec.industry or "General",
+                    is_fno_eligible=bool(sec.is_fno_eligible),
+                    is_active=True,
+                    asm_gsm_stage=sec.asm_gsm_stage,
+                    lot_size=sec.lot_size,
+                )
             )
-            eligible_universe.append(enriched_sec)
 
-        # Persist to disk
+        if not eligible_universe:
+            raise DataUnavailableException(
+                "NSE security master returned no eligible active equities after validation."
+            )
+
         self._persist_security_master(eligible_universe)
-        logger.info(f"Built eligible NSE universe with {len(eligible_universe)} securities ({sum(1 for s in eligible_universe if s.is_fno_eligible)} F&O eligible).")
+        logger.info(
+            "Built canonical NSE universe with %d active securities (%d F&O eligible).",
+            len(eligible_universe),
+            sum(1 for s in eligible_universe if s.is_fno_eligible),
+        )
         return eligible_universe
 
     def _persist_security_master(self, securities: list[SymbolMetadata]) -> None:
-        """Saves canonical universe to JSON cache."""
+        """Persist the validated canonical universe atomically."""
         payload = {
-            "updated_at": datetime.utcnow().isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
             "total_count": len(securities),
             "fno_count": sum(1 for s in securities if s.is_fno_eligible),
             "securities": [s.model_dump() for s in securities],
         }
-        self.security_master_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        tmp = self.security_master_file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        tmp.replace(self.security_master_file)
