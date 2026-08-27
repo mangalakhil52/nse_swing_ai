@@ -92,6 +92,14 @@ class NseDataProvider(MarketDataProvider):
         except Exception as exc:
             raise DataUnavailableException(f"Failed to fetch NSE Bhavcopy for {target_date}: {exc}") from exc
 
+    @staticmethod
+    def _nse_numeric(series: pd.Series) -> pd.Series:
+        """Parse NSE numeric fields, including comma-formatted values and blanks."""
+        return pd.to_numeric(
+            series.astype("string").str.strip().str.replace(",", "", regex=False),
+            errors="coerce",
+        )
+
     def _clean_bhavcopy_df(self, df: pd.DataFrame, target_date: date) -> pd.DataFrame:
         df = df.copy()
         df.columns = [str(c).strip().upper() for c in df.columns]
@@ -114,9 +122,9 @@ class NseDataProvider(MarketDataProvider):
         df = df.rename(columns=rename_map)
         for col in ["open", "high", "low", "close", "volume", "delivery_volume", "delivery_pct", "vwap"]:
             if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
+                df[col] = self._nse_numeric(df[col])
         if "turnover_lacs" in df.columns:
-            df["turnover_crores"] = pd.to_numeric(df["turnover_lacs"], errors="coerce") / 100.0
+            df["turnover_crores"] = self._nse_numeric(df["turnover_lacs"]) / 100.0
         elif {"close", "volume"}.issubset(df.columns):
             df["turnover_crores"] = (df["close"] * df["volume"]) / 1e7
 
@@ -317,5 +325,5 @@ class NseDataProvider(MarketDataProvider):
                     )
                 )
         if not securities:
-            raise DataUnavailableException("NSE EQUITY_L.csv contained no active equity securities")
+            raise DataUnavailableException("NSE EQUITY_L.csv yielded no active equity securities")
         return securities
