@@ -19,6 +19,7 @@ from src.core.exceptions import DataUnavailableException
 from src.database.connection import get_db_session, init_db
 from src.database.repository import DatabaseRepository
 from src.data.bulk_history import BulkHistoricalLoader
+from src.data.nse_index_provider import NseIndexDataProvider
 from src.data.nse_provider import NseDataProvider
 from src.quant.regime import MarketRegimeClassifier
 from src.quant.regime_inputs import compute_breadth, latest_vix
@@ -55,6 +56,7 @@ async def execute_daily_5pm_cycle(target_date: date | None = None, force: bool =
 
     init_db()
     nse_provider = NseDataProvider()
+    index_provider = NseIndexDataProvider()
     bulk_loader = BulkHistoricalLoader(nse_provider)
     telegram_bot = TelegramBotNotifier()
     ledger_manager = TradeLedgerExcelManager()
@@ -96,11 +98,10 @@ async def execute_daily_5pm_cycle(target_date: date | None = None, force: bool =
         )
         eligible_meta = [m for m in candidate_meta if m.symbol in stock_dfs]
 
-        # All regime inputs are sourced from the same point-in-time boundary.
-        nifty_df = await nse_provider.get_index_history("NIFTY 50", start_history_date, target_date)
+        nifty_df = await index_provider.get_index_history("NIFTY 50", start_history_date, target_date)
         if len(nifty_df) < 200:
             raise DataUnavailableException(f"NIFTY 50 history insufficient: {len(nifty_df)} bars")
-        vix_df = await nse_provider.get_india_vix_history(start_history_date, target_date)
+        vix_df = await index_provider.get_india_vix_history(start_history_date, target_date)
         ad_ratio, pct_above_50 = compute_breadth(stock_dfs, target_date)
         vix = latest_vix(vix_df, target_date)
         regime_result = MarketRegimeClassifier.classify_regime(
@@ -172,6 +173,7 @@ async def execute_daily_5pm_cycle(target_date: date | None = None, force: bool =
         return 1
     finally:
         await bulk_loader.close()
+        await index_provider.close()
 
 
 def setup_windows_task_scheduler() -> None:
