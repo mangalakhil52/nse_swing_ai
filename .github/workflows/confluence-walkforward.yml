@@ -1,0 +1,48 @@
+name: Confluence Multi-Window Walk-Forward
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: 'Evaluation start date'
+        required: true
+        default: '2023-07-26'
+      end_date:
+        description: 'Evaluation end date'
+        required: true
+        default: '2026-08-24'
+      test_days:
+        description: 'OOS window size in trading days'
+        required: true
+        default: '126'
+      step_days:
+        description: 'Walk-forward step in trading days'
+        required: true
+        default: '126'
+
+jobs:
+  walkforward:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 180
+    steps:
+      - name: Checkout frozen strategy
+        uses: actions/checkout@v4
+        with:
+          ref: feat/oos-validation-runner-9
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Build historical dataset
+        run: python scripts/build_oos_dataset.py --start '2023-07-26' --end '${{ inputs.end_date }}' --output artifacts/oos_data
+      - name: Run multi-window walk-forward
+        run: python scripts/run_confluence_walkforward.py --data-dir artifacts/oos_data --start '${{ inputs.start_date }}' --end '${{ inputs.end_date }}' --test-days '${{ inputs.test_days }}' --step-days '${{ inputs.step_days }}' --output artifacts/confluence_walkforward.json
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: confluence-walkforward-report
+          path: artifacts/confluence_walkforward.json
