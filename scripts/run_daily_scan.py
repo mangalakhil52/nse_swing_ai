@@ -61,13 +61,16 @@ async def run_scan(scan_date: date, dry_run: bool = False, force: bool = False) 
         if bhavcopy_df.empty:
             raise DataUnavailableException(f"Empty NSE Bhavcopy for {scan_date}")
 
-        # Cheap same-day gate before historical loading.
+        # Same-day liquidity gate determines which symbols enter the expensive
+        # specialist pipeline, but breadth is calculated from the ENTIRE NSE
+        # universe, not from the filtered candidate set.
         bhavcopy_df["_symbol"] = bhavcopy_df["symbol"].astype(str).str.strip().str.upper()
         bhav_by_symbol = bhavcopy_df.set_index("_symbol")
         bhav_symbols = set(bhavcopy_df["_symbol"])
-        candidate_meta = [m for m in universe_meta if m.symbol.upper() in bhav_symbols]
         filtered_meta = []
-        for meta in candidate_meta:
+        for meta in universe_meta:
+            if meta.symbol.upper() not in bhav_symbols:
+                continue
             row = bhav_by_symbol.loc[meta.symbol.upper()]
             if hasattr(row, "iloc") and getattr(row, "ndim", 1) > 1:
                 row = row.iloc[0]
@@ -75,24 +78,28 @@ async def run_scan(scan_date: date, dry_run: bool = False, force: bool = False) 
             turnover = float(row.get("turnover_crores", 0.0))
             if close >= 20.0 and turnover >= 3.0:
                 filtered_meta.append(meta)
-        logger.info("Same-day liquidity gate: %d/%d symbols retained", len(filtered_meta), len(candidate_meta))
+        logger.info("Same-day liquidity gate: %d/%d symbols retained", len(filtered_meta), len(universe_meta))
 
-        # 400 calendar days gives enough observations for 52W structure and long EMAs.
+        # One official Bhavcopy request per trading day for the entire NSE
+        # universe. This preserves whole-market breadth while avoiding the
+        # previous N-symbol x M-day request storm.
         start_history_date = scan_date - timedelta(days=400)
         stock_dfs = await bulk_loader.load(
-            [m.symbol for m in filtered_meta],
+            [m.symbol for m in universe_meta],
             start_history_date,
             scan_date,
             min_bars=100,
         )
         eligible_meta = [m for m in filtered_meta if m.symbol in stock_dfs]
-        logger.info("Historical PIT data available for %d symbols", len(eligible_meta))
+        logger.info("Historical PIT data available for %d/%d NSE symbols", len(stock_dfs), len(universe_meta))
 
         nifty_df = await index_provider.get_index_history("NIFTY 50", start_history_date, scan_date)
         vix_df = await index_provider.get_india_vix_history(start_history_date, scan_date)
         if len(nifty_df) < 200:
             raise DataUnavailableException(f"NIFTY 50 history insufficient: {len(nifty_df)} bars < 200")
 
+        # Market breadth is intentionally computed over all symbols with valid
+        # historical observations, not just the tradeable shortlist.
         ad_ratio, pct_above_50 = compute_breadth(stock_dfs, scan_date)
         vix = latest_vix(vix_df, scan_date)
         regime_result = MarketRegimeClassifier.classify_regime(
@@ -115,7 +122,8 @@ async def run_scan(scan_date: date, dry_run: bool = False, force: bool = False) 
             return 0
 
         screener = QuantScreener(min_adtv_crores=5.0, min_price=20.0)
-        candidates = screener.screen_universe(eligible_meta, stock_dfs, nifty_df)
+        candidate_dfs = {m.symbol: stock_dfs[m.symbol] for m in eligible_meta if m.symbol in stock_dfs}
+        candidates = screener.screen_universe(eligible_meta, candidate_dfs, nifty_df)
         logger.info("Final Stage-1 candidates: %d", len(candidates))
         if not candidates:
             logger.info("NO TRADE TODAY: Stage-1 screener produced no candidates")
@@ -125,7 +133,7 @@ async def run_scan(scan_date: date, dry_run: bool = False, force: bool = False) 
         universe = {m.symbol: m for m in eligible_meta}
         recommendations = await cio.run_daily_scan(
             candidates=candidates,
-            stock_dfs=stock_dfs,
+            stock_dfs=candidate_dfs,
             universe=universe,
             regime_result=regime_result,
             run_id=run_id,
