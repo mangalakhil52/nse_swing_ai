@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 
 from src.backtest.engine import BacktestEngine, BacktestTrade
+from src.backtest.walk_forward import WalkForwardConfig, WalkForwardValidator
 from src.quant.backtest_metrics import max_drawdown, profit_factor, sharpe, sortino
 from src.quant.advanced_alpha import compute_alpha_features
 from src.quant.indicators import TechnicalIndicators
@@ -151,3 +152,37 @@ def compare(stock_dfs: dict[str, pd.DataFrame], benchmark_df: pd.DataFrame, conf
             "max_drawdown_pct": round(enhanced_report.max_drawdown_pct - base_report.max_drawdown_pct, 3),
         },
     }
+
+
+def walk_forward_compare(
+    stock_dfs: dict[str, pd.DataFrame],
+    benchmark_df: pd.DataFrame,
+    wf_config: WalkForwardConfig | None = None,
+    experiment_config: ExperimentConfig | None = None,
+) -> dict[str, Any]:
+    """Compare baseline vs P1 only on strictly chronological OOS test windows."""
+    cfg = wf_config or WalkForwardConfig()
+    baseline, enhanced = generate_signal_sets(stock_dfs, benchmark_df, experiment_config)
+    dates = WalkForwardValidator.extract_sorted_trading_dates(stock_dfs)
+    windows, error = WalkForwardValidator.generate_windows(dates, cfg)
+    if error or not windows:
+        raise ValueError(error or "No walk-forward windows")
+
+    rows = []
+    for window in windows:
+        test_set = set(window.test_dates)
+        base_test = [s for s in baseline if s["event_date"] in test_set]
+        enhanced_test = [s for s in enhanced if s["event_date"] in test_set]
+        base_trades = _run_trades(base_test, stock_dfs)
+        enhanced_trades = _run_trades(enhanced_test, stock_dfs)
+        rows.append({
+            "window_id": window.window_id,
+            "train_end": window.train_end,
+            "validation_end": window.validation_end,
+            "test_start": window.test_start,
+            "test_end": window.test_end,
+            "baseline": asdict(summarize("BASELINE", base_test, base_trades)),
+            "enhanced": asdict(summarize("P1_ALPHA_GATE", enhanced_test, enhanced_trades)),
+        })
+
+    return {"config": vars(cfg), "windows": rows, "leakage_contract": "STRICT_CHRONOLOGICAL_OOS"}
