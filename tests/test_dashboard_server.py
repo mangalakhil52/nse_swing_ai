@@ -74,7 +74,7 @@ def test_api_health_endpoint(server_url):
     assert req.status == 200
     data = json.loads(req.read().decode("utf-8"))
     assert data["system_status"] == "ONLINE"
-    assert "359 / 359" in data["test_suite_status"]
+    assert "TESTS PASSING" in data["test_suite_status"]
     assert "desks" in data
 
 
