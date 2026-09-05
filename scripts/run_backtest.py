@@ -135,7 +135,9 @@ async def run_universe_backtest_async(lookback: int) -> None:
     start_dt = end_dt - timedelta(days=lookback)
 
     # Survivorship-safe historical universe
-    symbols = HistoricalUniverseProvider.get_universe_for_date(start_dt)
+    from src.data.universe import UniverseDiscoveryEngine
+    active_securities = UniverseDiscoveryEngine.get_default_active_universe()
+    symbols = HistoricalUniverseProvider.get_universe_for_date(start_dt, securities=active_securities)
     logger.info(f"Loaded {len(symbols)} eligible historical universe symbols.")
 
     all_trades: list[BacktestTrade] = []

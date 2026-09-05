@@ -37,9 +37,32 @@ ScopedSession = scoped_session(session_factory)
 
 
 def init_db() -> None:
-    """Initializes all database tables defined in SQLAlchemy schema."""
+    """Initializes all database tables defined in SQLAlchemy schema and handles column migrations."""
     try:
         Base.metadata.create_all(bind=engine)
+        # Migrate SQLite schema columns if table exists without new target/stop columns
+        if db_url.startswith("sqlite"):
+            from sqlalchemy import text
+            with engine.connect() as conn:
+                res = conn.execute(text("PRAGMA table_info(shadow_trades)"))
+                existing_cols = {row[1] for row in res.fetchall()}
+                new_cols = {
+                    "stop_loss": "FLOAT",
+                    "target_1": "FLOAT",
+                    "target_2": "FLOAT",
+                    "target_3": "FLOAT",
+                    "t1_hit": "BOOLEAN DEFAULT 0",
+                    "t2_hit": "BOOLEAN DEFAULT 0",
+                    "t3_hit": "BOOLEAN DEFAULT 0",
+                    "position_size_shares": "INTEGER",
+                }
+                for col_name, col_type in new_cols.items():
+                    if col_name not in existing_cols:
+                        try:
+                            conn.execute(text(f"ALTER TABLE shadow_trades ADD COLUMN {col_name} {col_type}"))
+                        except Exception:
+                            pass
+                conn.commit()
         logger.info(f"Database schema initialized successfully using {db_url.split('://')[0]}.")
     except Exception as e:
         logger.error(f"Failed to initialize database schema: {e}")

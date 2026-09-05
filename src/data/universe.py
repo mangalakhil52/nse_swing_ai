@@ -26,6 +26,22 @@ logger = logging.getLogger(__name__)
 class UniverseDiscoveryEngine:
     """Discovers and manages the canonical NSE equity universe."""
 
+    @classmethod
+    def get_default_active_universe(cls) -> list[SymbolMetadata]:
+        """Returns standard baseline active SymbolMetadata objects for active trading equities."""
+        return [
+            SymbolMetadata(
+                symbol=sym,
+                company_name=sym,
+                exchange="NSE",
+                sector="General",
+                industry="General",
+                is_active=True,
+                is_fno_eligible=True,
+            )
+            for sym in sorted(STANDARD_FNO_SYMBOLS)
+        ]
+
     def __init__(self, market_data_provider: MarketDataProvider, cache_dir: Path | None = None):
         self.provider = market_data_provider
         self.cache_dir = cache_dir or settings.CACHE_DIR / "universe"
