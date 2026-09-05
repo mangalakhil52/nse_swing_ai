@@ -151,7 +151,8 @@ class TechnicalAnalysisAgent(BaseAgent):
             evidence=evidence_graph.to_evidence_items(symbol), risks_identified=risks)
 
     async def analyze_contract(self, symbol_meta: SymbolMetadata, df: pd.DataFrame,
-                               decision_time: datetime | date, run_id: str = "") -> AgentAnalysisResult:
+                               decision_time: datetime | date, run_id: str = "",
+                               context: dict[str, Any] | None = None) -> AgentAnalysisResult:
         """Emit the #14A AgentAnalysisResult contract with explicit PIT status."""
         symbol = symbol_meta.symbol.upper().strip()
         pit_df = self._pit_slice(df, decision_time)

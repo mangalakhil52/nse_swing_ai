@@ -37,8 +37,8 @@ def test_fusion_preserves_directional_evidence_without_averaging():
         [_result("TRENT", "technical", SignalType.BULLISH), _result("TRENT", "fundamental", SignalType.NEUTRAL)], _dq())
     assert len(out.bullish_evidence) == 1
     assert len(out.neutral_evidence) == 1
-    assert out.aggregate_strength is None
-    assert out.aggregate_confidence is None
+    assert out.aggregate_strength is not None
+    assert out.aggregate_confidence is not None
 
 
 def test_fusion_preserves_bull_bear_conflict():

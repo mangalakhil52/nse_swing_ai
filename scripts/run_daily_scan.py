@@ -166,7 +166,6 @@ async def run_scan(scan_date: date, dry_run: bool = False, force: bool = False) 
         else:
             logger.info("NO TRADE TODAY: CIO rejected all candidates")
         return 0
-<<<<<<< HEAD
     except DataUnavailableException as exc:
         logger.error("DATA_UNAVAILABLE: %s", exc)
         return 1
@@ -176,83 +175,6 @@ async def run_scan(scan_date: date, dry_run: bool = False, force: bool = False) 
     finally:
         await bulk_loader.close()
         await index_provider.close()
-=======
-
-    # 5. Fast Stage-1 Screener across Bhavcopy
-    logger.info(f"Running Stage-1 quantitative screener across full universe ({len(universe_meta)} symbols)...")
-    screener = QuantScreener(min_adtv_crores=5.0, min_price=20.0)
-
-    # Filter universe using Bhavcopy records first
-    bhav_symbols = set(bhavcopy_df["symbol"].str.strip().tolist())
-    candidate_meta = [m for m in universe_meta if m.symbol in bhav_symbols]
-
-    # Pre-filter candidates with positive turnover and volume
-    filtered_meta = []
-    for m in candidate_meta:
-        b_rows = bhavcopy_df[bhavcopy_df["symbol"].str.strip() == m.symbol]
-        if not b_rows.empty:
-            row = b_rows.iloc[0]
-            c = float(row.get("close", 0.0))
-            v = int(row.get("volume", 0))
-            turnover = (c * v) / 1e7
-            if c >= 20.0 and turnover >= 3.0:
-                filtered_meta.append(m)
-
-    logger.info(f"Stage-1 Bhavcopy pre-filter output: {len(filtered_meta)} candidates for historical evaluation.")
-
-    # 6. Fetch Multi-day Historical OHLCV for Pre-Filtered Candidates & Pass to CandidateDiscoveryEngine
-    from src.candidate_discovery import CandidateDiscoveryConfig, CandidateDiscoveryEngine
-
-    stock_dfs: dict[str, pd.DataFrame] = {}
-    eligible_meta: list[SymbolMetadata] = []
-
-    for sym_meta in filtered_meta:
-        sym = sym_meta.symbol
-        try:
-            df_hist = await hist_provider.get_daily_ohlcv(sym, start_history_date, scan_date, min_bars=50)
-            stock_dfs[sym] = df_hist
-            eligible_meta.append(sym_meta)
-        except Exception as e:
-            logger.debug(f"Skipping {sym} due to unavailable/insufficient historical data: {e}")
-
-    discovery_results = CandidateDiscoveryEngine.discover_candidates(
-        universe=eligible_meta,
-        as_of_date=scan_date,
-        market_data_map=stock_dfs,
-        config=CandidateDiscoveryConfig(min_price=20.0, min_average_turnover_crores=3.0, min_history_length=50),
-    )
-
-    discovered_eligible_meta = [
-        m for m, res in zip(eligible_meta, discovery_results) if res.eligible
-    ]
-
-    candidates = screener.screen_universe(discovered_eligible_meta, stock_dfs, nifty_df)
-    logger.info(f"Screener final output: {len(candidates)} candidates for deep multi-agent research.")
-
-    if not candidates:
-        logger.info("No candidates passed Stage-1 screening. Exiting cleanly.")
-        return 0
-
-    # 7. CIO Multi-Agent Research & Adversarial Thesis Killer
-    logger.info(f"Running CIO multi-agent pipeline on {len(candidates)} candidates...")
-    cio = CIOOrchestrator()
-    recommendations = await cio.run_daily_scan(
-        candidates=candidates,
-        stock_dfs=stock_dfs,
-        universe={m.symbol: m for m in eligible_meta},
-        regime_result=regime_result,
-        run_id=run_id,
-    )
-
-    logger.info(f"Scan complete. Generated {len(recommendations)} high-conviction trade recommendations.")
-
-    # 8. Dispatch Telegram Alerts
-    if recommendations:
-        summary_msg = TelegramFormatter.format_scan_summary(recommendations, regime_result.regime.value)
-        logger.info(f"\nTelegram Summary Output:\n{summary_msg}")
-
-    return 0
->>>>>>> 66f33b9 (Real Trade Analysis & Scanner Integration: Fix universe initialization in run_daily_scan.py, integrate CandidateDiscoveryEngine, connect run_shadow_monitor.py to SQLite database, implement RealTradeAnalyzer in src/shadow/analyzer.py, CLI tool in scripts/analyze_trades.py, and test suite in tests/test_real_trade_analysis.py)
 
 
 def main() -> None:

@@ -133,7 +133,7 @@ class CIODecision(BaseModel):
 
 
 class EvidenceFusionEngine:
-    """Combines structured agent evidence without magic average weights or fake scoring models."""
+    """Combines structured agent evidence with deterministic reliability-weighted strength scoring (#14D)."""
 
     @classmethod
     def fuse_evidence(
@@ -150,11 +150,20 @@ class EvidenceFusionEngine:
         conflicts: list[str] = []
         vetoes: list[str] = []
 
+        valid_agents = 0
+        total_agent_conf = 0.0
+        domain_weights: dict[str, float] = {}
+
         # Collect evidence across all agent results without collapsing UNKNOWN and NEUTRAL
         for agent_res in agent_results:
             if not agent_res.pit_safe:
                 vetoes.append(f"AGENT_PIT_VIOLATION_{agent_res.agent_name.upper()}")
                 vetoes.append("PIT_VIOLATION")
+
+            if agent_res.pit_safe and agent_res.status == AgentStatus.SUCCESS:
+                valid_agents += 1
+                total_agent_conf += agent_res.confidence
+                domain_weights[agent_res.agent_name.upper()] = agent_res.confidence
 
             if agent_res.signal == SignalType.BULLISH:
                 bullish.extend(agent_res.evidence)
@@ -166,7 +175,7 @@ class EvidenceFusionEngine:
                 unknown.extend(agent_res.evidence)
 
         # Detect agent disagreements and preserve them explicitly
-        signals = {res.agent_name: res.signal for res in agent_results}
+        signals = {res.agent_name: res.signal for res in agent_results if res.pit_safe}
         if SignalType.BULLISH in signals.values() and SignalType.BEARISH in signals.values():
             conflicts.append("CONTRADICTORY_SIGNALS: Agents express opposing BULLISH and BEARISH views.")
 
@@ -175,7 +184,33 @@ class EvidenceFusionEngine:
             vetoes.append("DATA_QUALITY_PIT_VIOLATION")
             vetoes.append("PIT_VIOLATION")
 
-        # Invariant: NO magic score averaging inside #14A
+        # Calculate deterministic aggregate evidence strength & confidence (#14D)
+        total_evidence = bullish + bearish + neutral + unknown
+        if total_evidence and valid_agents > 0:
+            weighted_dir_sum = 0.0
+            total_weight = 0.0
+            strength_map = {"HIGH": 1.0, "MEDIUM": 0.65, "LOW": 0.35}
+
+            for ev in total_evidence:
+                if not ev.pit_safe:
+                    continue
+                is_bull = (ev.direction == SignalType.BULLISH or str(ev.direction).upper() in ("BULLISH", "BUY"))
+                is_bear = (ev.direction == SignalType.BEARISH or str(ev.direction).upper() in ("BEARISH", "SELL"))
+                dir_val = 1.0 if is_bull else (-1.0 if is_bear else 0.0)
+                str_val = strength_map.get(str(ev.strength).upper(), 0.5)
+                w = ev.reliability * str_val
+                weighted_dir_sum += dir_val * w
+                total_weight += w
+
+            aggregate_strength = round(weighted_dir_sum / max(1e-6, total_weight), 4) if total_weight > 0 else 0.0
+            domain_coverage = min(1.0, len(domain_weights) / 4.0)
+            avg_conf = (total_agent_conf / valid_agents) if valid_agents > 0 else 0.0
+            dq_factor = (data_quality.overall_quality_score / 100.0) if data_quality else 1.0
+            aggregate_confidence = round(avg_conf * domain_coverage * dq_factor, 4)
+        else:
+            aggregate_strength = None
+            aggregate_confidence = None
+
         return FusionResult(
             symbol=symbol,
             decision_time=decision_time,
@@ -184,35 +219,20 @@ class EvidenceFusionEngine:
             neutral_evidence=neutral,
             unknown_evidence=unknown,
             conflicts=conflicts,
-            aggregate_strength=None,  # Not computed in #14A
-            aggregate_confidence=None,  # Not computed in #14A
+            aggregate_strength=aggregate_strength,
+            aggregate_confidence=aggregate_confidence,
             data_quality=data_quality,
             vetoes=list(set(vetoes)),
         )
 
 
 class ConvictionEngine:
-    """Evaluates evidence conviction contract without arbitrary strategy thresholds."""
+    """Evaluates evidence conviction score and grade deterministically (#14D)."""
 
     @classmethod
     def evaluate_conviction(cls, fusion_result: FusionResult) -> ConvictionResult:
-        if fusion_result.vetoes or not fusion_result.data_quality.pit_safe:
-            return ConvictionResult(
-                symbol=fusion_result.symbol,
-                decision_time=fusion_result.decision_time,
-                grade=ConvictionGrade.REJECTED,
-                score=0.0,
-                reasons=["REJECTED_DUE_TO_VETOES_OR_PIT_FAILURE"],
-            )
-
-        # Contract placeholder: Conviction methodology is not computed in #14A
-        return ConvictionResult(
-            symbol=fusion_result.symbol,
-            decision_time=fusion_result.decision_time,
-            grade=ConvictionGrade.NOT_COMPUTED,
-            score=0.0,
-            reasons=["CONVICTION_METHODOLOGY_NOT_COMPUTED_IN_14A"],
-        )
+        from src.architecture.conviction_engine import ConvictionSynthesisService
+        return ConvictionSynthesisService.evaluate(fusion_result)
 
 
 class CIOContract:
@@ -249,16 +269,20 @@ class CIOContract:
 
         if cio_input.conviction_result.grade == ConvictionGrade.HIGH_CONVICTION:
             decision = "BUY"
-        elif cio_input.conviction_result.grade in (ConvictionGrade.MEDIUM_CONVICTION, ConvictionGrade.LOW_CONVICTION):
+        elif cio_input.conviction_result.grade == ConvictionGrade.MEDIUM_CONVICTION:
             decision = "WATCH"
+        elif cio_input.conviction_result.grade == ConvictionGrade.REJECTED:
+            decision = "REJECT"
         else:
             decision = "NO_TRADE"
+
+        confidence = round(cio_input.conviction_result.score / 100.0, 4)
 
         return CIODecision(
             symbol=cio_input.symbol,
             decision_time=cio_input.decision_time,
             decision=decision,
-            confidence=0.0,
+            confidence=confidence,
             reasons=cio_input.conviction_result.reasons,
             vetoes=cio_input.fusion_result.vetoes,
         )

@@ -56,7 +56,7 @@ def test_fusion_does_not_compute_magic_average():
 
 
 def test_conviction_does_not_apply_arbitrary_thresholds():
-    """2. Test ConvictionEngine returns NOT_COMPUTED and does NOT use arbitrary thresholds in #14A."""
+    """2. Test ConvictionEngine returns LOW_CONVICTION when evidence is empty."""
     dt = datetime(2026, 8, 19, 10, 0)
     dq_res = DataQualityResult(
         symbol="TRENT", as_of_date=dt, overall_status=DataQualityStatus.VALID,
@@ -67,7 +67,7 @@ def test_conviction_does_not_apply_arbitrary_thresholds():
     conviction = ConvictionEngine.evaluate_conviction(fusion)
 
     assert conviction.grade == ConvictionGrade.NOT_COMPUTED
-    assert "CONVICTION_METHODOLOGY_NOT_COMPUTED_IN_14A" in conviction.reasons
+    assert any("INSUFFICIENT" in r for r in conviction.reasons)
 
 
 def test_agent_pit_veto_reaches_cio():

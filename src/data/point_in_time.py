@@ -39,12 +39,13 @@ class PITContract:
     pit_status: str  # "VERIFIED", "UNVERIFIED", "FAIL_CLOSED"
     leakage_risk: str  # "NONE", "LOW", "MEDIUM", "HIGH"
 
-    def is_available(self, as_of_date: date) -> bool:
+    def is_available(self, as_of_date: date | datetime) -> bool:
         """Determines if the record is point-in-time safe and available at as_of_date."""
         if self.available_at is None:
             return False
+        as_of_d = as_of_date.date() if isinstance(as_of_date, datetime) else as_of_date
         avail_d = self.available_at if isinstance(self.available_at, date) else pd.to_datetime(self.available_at).date()
-        return avail_d <= as_of_date
+        return avail_d <= as_of_d
 
 
 class PointInTimeFilter:
@@ -110,76 +111,80 @@ class PointInTimeFilter:
         return valid
 
     @classmethod
-    def filter_events(cls, events: list[CorporateEvent], as_of_date: date) -> list[CorporateEvent]:
+    def filter_events(cls, events: list[CorporateEvent], as_of_date: date | datetime) -> list[CorporateEvent]:
         """
         Filters corporate events based on explicit announcement_date / available_at.
         Fails closed (excludes item) if availability timestamp is missing.
         """
         valid = []
+        as_of_d = as_of_date.date() if isinstance(as_of_date, datetime) else as_of_date
         for e in events:
             avail = getattr(e, "available_at", None) or getattr(e, "announcement_date", None)
             if avail is None:
                 logger.warning(f"PIT_UNVERIFIED: CorporateEvent for {e.symbol} on {e.event_date} lacks available_at/announcement_date.")
                 continue
             avail_d = avail if isinstance(avail, date) else pd.to_datetime(avail).date()
-            if avail_d <= as_of_date:
+            if avail_d <= as_of_d:
                 valid.append(e)
         return valid
 
     @classmethod
     def filter_quarterly_financials(
-        cls, financials: list[QuarterlyFinancials], as_of_date: date
+        cls, financials: list[QuarterlyFinancials], as_of_date: date | datetime
     ) -> list[QuarterlyFinancials]:
         """
         Filters quarterly financial results so only results filed/available on or before as_of_date are used.
         Fails closed (excludes item) if filing_date / available_at is missing. Does NOT guess or add 45 days.
         """
         valid = []
+        as_of_d = as_of_date.date() if isinstance(as_of_date, datetime) else as_of_date
         for f in financials:
             avail = getattr(f, "available_at", None) or getattr(f, "filing_date", None)
             if avail is None:
                 logger.warning(f"PIT_UNVERIFIED: QuarterlyFinancials for {f.symbol} period_end {f.period_end_date} lacks filing_date/available_at.")
                 continue
             avail_d = avail if isinstance(avail, date) else pd.to_datetime(avail).date()
-            if avail_d <= as_of_date:
+            if avail_d <= as_of_d:
                 valid.append(f)
         return valid
 
     @classmethod
     def filter_annual_ratios(
-        cls, ratios: list[AnnualRatios], as_of_date: date
+        cls, ratios: list[AnnualRatios], as_of_date: date | datetime
     ) -> list[AnnualRatios]:
         """
         Filters annual ratio records based on explicit available_at timestamp.
         Fails closed (excludes item) if available_at is missing.
         """
         valid = []
+        as_of_d = as_of_date.date() if isinstance(as_of_date, datetime) else as_of_date
         for r in ratios:
             avail = getattr(r, "available_at", None)
             if avail is None:
                 logger.warning(f"PIT_UNVERIFIED: AnnualRatios for {r.symbol} fiscal_year {r.fiscal_year} lacks available_at.")
                 continue
             avail_d = avail if isinstance(avail, date) else pd.to_datetime(avail).date()
-            if avail_d <= as_of_date:
+            if avail_d <= as_of_d:
                 valid.append(r)
         return valid
 
     @classmethod
     def filter_shareholding_patterns(
-        cls, patterns: list[ShareholdingPattern], as_of_date: date
+        cls, patterns: list[ShareholdingPattern], as_of_date: date | datetime
     ) -> list[ShareholdingPattern]:
         """
         Filters shareholding pattern records based on explicit available_at timestamp.
         Fails closed (excludes item) if available_at is missing.
         """
         valid = []
+        as_of_d = as_of_date.date() if isinstance(as_of_date, datetime) else as_of_date
         for s in patterns:
             avail = getattr(s, "available_at", None)
             if avail is None:
                 logger.warning(f"PIT_UNVERIFIED: ShareholdingPattern for {s.symbol} quarter {s.quarter_date} lacks available_at.")
                 continue
             avail_d = avail if isinstance(avail, date) else pd.to_datetime(avail).date()
-            if avail_d <= as_of_date:
+            if avail_d <= as_of_d:
                 valid.append(s)
         return valid
 

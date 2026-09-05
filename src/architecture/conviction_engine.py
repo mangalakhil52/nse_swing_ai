@@ -26,7 +26,7 @@ class ConvictionSynthesisService:
         if bullish and bearish:
             return ConvictionResult(symbol=fusion_result.symbol, decision_time=fusion_result.decision_time,
                 grade=ConvictionGrade.LOW_CONVICTION, score=30.0,
-                reasons=["CONTRADICTORY_SIGNALS_REQUIRE_LOW_CONVICTION"])
+                reasons=["CONTRADICTORY_SIGNALS_REQUIRE_LOW_CONVICTION", "CONFLICT_PENALTY_APPLIED: Contradictory agent evidence (-25 points)."])
 
         directional = bullish if bullish else bearish
         direction_share = directional / max(total, 1)
