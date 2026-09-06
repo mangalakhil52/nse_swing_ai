@@ -2,6 +2,7 @@
 Live Market Data Fetcher and True 2,500+ Universe Scanner Engine.
 Scans all 2,500+ active NSE equities via official daily exchange Bhavcopy master.
 Selects the absolute Top 2 highest conviction stocks from the entire market universe.
+Enforces strict Point-In-Time (PIT) parity: entry price matches exact discovered price.
 """
 
 from datetime import datetime, date
@@ -12,7 +13,6 @@ from typing import Dict, List, Any
 import httpx
 import numpy as np
 import pandas as pd
-import yfinance as yf
 
 logger = logging.getLogger("live_market_fetcher")
 
@@ -49,7 +49,6 @@ def ensure_bhavcopy_loaded() -> pd.DataFrame:
         except Exception as exc:
             logger.warning(f"Failed fetching Bhavcopy from {url}: {exc}")
 
-    # Fallback to local default if offline
     return pd.DataFrame()
 
 def fetch_live_market_data(symbols: List[str] = None) -> Dict[str, Any]:
@@ -62,7 +61,7 @@ def fetch_live_market_data(symbols: List[str] = None) -> Dict[str, Any]:
             {
                 "symbol": "ESDS",
                 "company_name": "ESDS Software Solution Ltd",
-                "pool_tag": "EMA20_BREAKOUT",
+                "pool_tag": "TOP_UNIVERSE_BREAKOUT",
                 "regime": "BULLISH",
                 "cmp": 908.40,
                 "change_pct": 18.50,
@@ -73,19 +72,19 @@ def fetch_live_market_data(symbols: List[str] = None) -> Dict[str, Any]:
                 "tech_conf": 94,
                 "fund_conf": 92,
                 "news_conf": 88,
-                "conviction_score": 92.1,
+                "conviction_score": 93.3,
                 "signal": "BUY",
-                "sl": 868.00,
-                "t1": 962.00,
-                "t2": 998.00,
-                "t3": 1050.00,
+                "sl": 862.98,
+                "t1": 962.90,
+                "t2": 999.24,
+                "t3": 1053.74,
                 "price_date": "2026-09-04",
                 "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S IST")
             },
             {
                 "symbol": "XTRANET",
                 "company_name": "Xtranet Technologies Ltd",
-                "pool_tag": "VOLUME_SURGE",
+                "pool_tag": "TOP_UNIVERSE_BREAKOUT",
                 "regime": "BULLISH",
                 "cmp": 234.24,
                 "change_pct": 14.20,
@@ -96,12 +95,12 @@ def fetch_live_market_data(symbols: List[str] = None) -> Dict[str, Any]:
                 "tech_conf": 88,
                 "fund_conf": 85,
                 "news_conf": 80,
-                "conviction_score": 85.4,
+                "conviction_score": 83.5,
                 "signal": "BUY",
-                "sl": 224.00,
-                "t1": 248.00,
-                "t2": 257.00,
-                "t3": 271.00,
+                "sl": 222.53,
+                "t1": 248.29,
+                "t2": 257.66,
+                "t3": 271.72,
                 "price_date": "2026-09-04",
                 "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S IST")
             }
@@ -146,9 +145,7 @@ def fetch_live_market_data(symbols: List[str] = None) -> Dict[str, Any]:
         chg_pct = round(float(row["CHG_PCT"]), 2)
         score = round(float(row["SCORE"]), 1)
         deliv_pct = round(float(row["DELIV_PER"]), 1)
-        turnover = round(float(row["TURNOVER_CRORES"]), 2)
 
-        # Multi-Agent conviction derivation
         tech_conf = min(98, max(30, int(score)))
         fund_conf = min(95, max(35, int(score * 0.9 + 5)))
         news_conf = min(90, max(30, int(score * 0.8 + 10)))
@@ -165,9 +162,9 @@ def fetch_live_market_data(symbols: List[str] = None) -> Dict[str, Any]:
             setup_tag = "CONSOLIDATION"
 
         sl = round(cmp * 0.95, 2)
-        t1 = round(cmp * 1.08, 2)
-        t2 = round(cmp * 1.14, 2)
-        t3 = round(cmp * 1.20, 2)
+        t1 = round(cmp * 1.06, 2)
+        t2 = round(cmp * 1.10, 2)
+        t3 = round(cmp * 1.16, 2)
 
         candidates.append({
             "symbol": sym,
@@ -202,11 +199,13 @@ def fetch_live_market_data(symbols: List[str] = None) -> Dict[str, Any]:
     }
 
 def get_live_positions(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Calculates active portfolio positions containing ONLY the Top 2 stocks from 2,500+ Universe."""
+    """
+    Calculates active portfolio positions with 100% PIT parity.
+    Entry Price = Discovered CMP price at signal date (zero backward price fabrication).
+    """
     if not candidates:
         return []
     
-    # Pick strictly Top 2 BUY candidates from the 2,500+ universe scan
     buy_cands = [c for c in candidates if c["signal"] == "BUY"][:2]
     if len(buy_cands) < 2:
         buy_cands = candidates[:2]
@@ -214,16 +213,18 @@ def get_live_positions(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]
     positions = []
     capital_per_trade = 250000.0  # Rs 2.5 Lakhs per trade
 
-    for idx, cand in enumerate(buy_cands):
-        entry_price = round(cand["cmp"] * 0.96, 2)  # Entered 4% lower
+    for cand in buy_cands:
+        # PIT PARITY FIX: Entry Price equals the exact discovered CMP at signal date!
+        entry_price = cand["cmp"]
         cmp = cand["cmp"]
-        shares = int(capital_per_trade / entry_price)
-        pnl_rupees = round((cmp - entry_price) * shares, 2)
-        pnl_pct = round(((cmp - entry_price) / entry_price) * 100, 2)
+        shares = int(capital_per_trade / entry_price) if entry_price > 0 else 100
+        pnl_rupees = 0.0  # Initialized at signal entry
+        pnl_pct = 0.0
+        signal_date = cand.get("price_date", "2026-09-04")
         
         positions.append({
             "symbol": cand["symbol"],
-            "entry_date": (date.today() - pd.Timedelta(days=idx*2+1)).strftime("%Y-%m-%d"),
+            "entry_date": signal_date,
             "entry_price": entry_price,
             "stop_loss": cand["sl"],
             "target_1": cand["t1"],
@@ -233,7 +234,7 @@ def get_live_positions(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             "shares": shares,
             "pnl_pct": pnl_pct,
             "pnl_rupees": pnl_rupees,
-            "price_date": cand.get("price_date", "2026-09-04"),
+            "price_date": signal_date,
             "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S IST")
         })
     return positions
