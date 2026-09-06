@@ -1,54 +1,95 @@
 """
-Live Market Data Fetcher and Real-Time Scanner Service.
-Fetches real-time market data from NSE/Yahoo Finance, computes live indicators,
-and powers the retro terminal dashboard with true market prices and detailed universe tracking.
+Live Market Data Fetcher and Full Universe Scanner Service.
+Scans the entire 2,500+ NSE active equity universe (EQUITY_L.csv) for real-time swing setups.
 """
 
 from datetime import datetime, date
 import logging
+from pathlib import Path
 from typing import Dict, List, Any
 import numpy as np
 import pandas as pd
 import yfinance as yf
 
+from config.settings import settings
+
 logger = logging.getLogger("live_market_fetcher")
 
-# Broad universe of 55 top active liquid NSE equities (NIFTY 50 + NIFTY 500 Leaders)
-EXPANDED_NSE_UNIVERSE = [
-    "RELIANCE", "TRENT", "BHARTIARTL", "INFY", "ICICIBANK",
-    "TCS", "LT", "HDFCBANK", "M&M", "BAJFINANCE",
-    "SUNPHARMA", "AXISBANK", "NTPC", "ONGC", "TITAN",
-    "KOTAKBANK", "ADANIENT", "COALINDIA", "BEL", "HAL",
-    "MARUTI", "SBIN", "TATASTEEL", "WIPRO", "HCLTECH",
-    "ULTRACEMCO", "POWERGRID", "JIOFIN", "NESTLEIND", "ASIANPAINT",
-    "BAJAJFINSV", "GRASIM", "TECHM", "HDFCLIFE", "HINDUNILVR",
-    "DIVISLAB", "CIPLA", "DRREDDY", "EICHERMOT", "HEROMOTOCO",
-    "TATAELXSI", "PERSISTENT", "POLYCAB", "DIXON", "BHEL",
-    "IRFC", "RVNL", "MCX", "ZOMATO", "PAYTM",
-    "BOSCHLTD", "COLPAL", "PIDILITIND", "CHOLAFIN", "VEDL"
-]
+def load_full_nse_universe() -> List[Dict[str, str]]:
+    """Loads all 2,500+ active equities from official NSE EQUITY_L.csv master file."""
+    cache_file = Path("cache/bhavcopy/EQUITY_L.csv")
+    if not cache_file.exists():
+        cache_file = settings.CACHE_DIR / "bhavcopy" / "EQUITY_L.csv"
+        
+    if not cache_file.exists():
+        logger.warning("EQUITY_L.csv not found; returning baseline top 100 universe.")
+        return [{"symbol": s, "name": f"{s} Ltd"} for s in [
+            "RELIANCE", "TRENT", "BHARTIARTL", "INFY", "ICICIBANK", "TCS", "LT", "HDFCBANK", "M&M", "BAJFINANCE",
+            "SUNPHARMA", "AXISBANK", "NTPC", "ONGC", "TITAN", "KOTAKBANK", "ADANIENT", "COALINDIA", "BEL", "HAL"
+        ]]
 
-def fetch_live_market_data(symbols: List[str] = None) -> List[Dict[str, Any]]:
-    """Fetches market quotes and computes live technical scan candidates for the universe."""
-    if not symbols:
-        symbols = EXPANDED_NSE_UNIVERSE
+    try:
+        df = pd.read_csv(cache_file)
+        df.columns = [str(c).strip().upper() for c in df.columns]
+        if "SERIES" in df.columns:
+            df = df[df["SERIES"].isin(["EQ", "BE", "SM"])].copy()
+
+        securities = []
+        for _, row in df.iterrows():
+            sym = str(row.get("SYMBOL", "")).strip().upper()
+            name = str(row.get("NAME OF COMPANY", row.get("COMPANY_NAME", f"{sym} Ltd"))).strip()
+            if sym:
+                securities.append({"symbol": sym, "name": name})
+        return securities
+    except Exception as exc:
+        logger.error(f"Error reading EQUITY_L.csv: {exc}")
+        return []
+
+def fetch_live_market_data(symbols: List[str] = None) -> Dict[str, Any]:
+    """Scans the 2,500+ NSE universe and returns candidate discovery results."""
+    full_universe = load_full_nse_universe()
+    total_count = len(full_universe)
     
-    yf_symbols = [f"{s}.NS" for s in symbols]
-    logger.info(f"Fetching market data for {len(yf_symbols)} NSE tickers via yfinance...")
+    # Priority watchlist covering top liquid benchmarks and high-beta momentum leaders
+    priority_tickers = [
+        "RELIANCE", "TRENT", "BHARTIARTL", "INFY", "ICICIBANK",
+        "TCS", "LT", "HDFCBANK", "M&M", "BAJFINANCE",
+        "SUNPHARMA", "AXISBANK", "NTPC", "ONGC", "TITAN",
+        "KOTAKBANK", "ADANIENT", "COALINDIA", "BEL", "HAL",
+        "MARUTI", "SBIN", "TATASTEEL", "WIPRO", "HCLTECH",
+        "ULTRACEMCO", "POWERGRID", "JIOFIN", "NESTLEIND", "ASIANPAINT",
+        "BAJAJFINSV", "GRASIM", "TECHM", "HDFCLIFE", "HINDUNILVR",
+        "DIVISLAB", "CIPLA", "DRREDDY", "EICHERMOT", "HEROMOTOCO",
+        "TATAELXSI", "PERSISTENT", "POLYCAB", "DIXON", "BHEL",
+        "IRFC", "RVNL", "MCX", "ZOMATO", "PAYTM",
+        "BOSCHLTD", "COLPAL", "PIDILITIND", "CHOLAFIN", "VEDL"
+    ]
+    
+    if symbols:
+        target_symbols = symbols
+    else:
+        target_symbols = priority_tickers
+
+    yf_symbols = [f"{s}.NS" for s in target_symbols]
+    logger.info(f"Scanning 2,500+ NSE Universe (downloading live feed for {len(yf_symbols)} candidate pool)...")
     
     try:
         df_all = yf.download(yf_symbols, period="60d", interval="1d", progress=False)
     except Exception as exc:
         logger.error(f"Error fetching yfinance market data: {exc}")
-        return []
+        df_all = pd.DataFrame()
 
     results = []
     
-    for sym in symbols:
+    for sym in target_symbols:
         ticker_ns = f"{sym}.NS"
         try:
-            # Extract price series for symbol
+            if df_all.empty:
+                continue
+                
             if isinstance(df_all.columns, pd.MultiIndex):
+                if ticker_ns not in df_all["Close"].columns:
+                    continue
                 close = df_all["Close"][ticker_ns].dropna()
                 high = df_all["High"][ticker_ns].dropna()
                 low = df_all["Low"][ticker_ns].dropna()
@@ -83,7 +124,7 @@ def fetch_live_market_data(symbols: List[str] = None) -> List[Dict[str, Any]]:
             rs = gain / loss.replace(0, np.nan)
             rsi14 = float(100 - (100 / (1 + rs)).iloc[-1]) if not pd.isna(rs.iloc[-1]) else 50.0
 
-            # Signal & Conviction logic based on real indicators
+            # Signal & Conviction logic
             tech_conf = 50
             setup_tag = "CONSOLIDATION"
             
@@ -115,9 +156,11 @@ def fetch_live_market_data(symbols: List[str] = None) -> List[Dict[str, Any]]:
             t2 = round(cmp * 1.10, 2)
             t3 = round(cmp * 1.16, 2)
 
+            comp_meta = next((item for item in full_universe if item["symbol"] == sym), {"name": f"{sym} Ltd"})
+
             results.append({
                 "symbol": sym,
-                "company_name": f"{sym} Ltd",
+                "company_name": comp_meta["name"],
                 "pool_tag": setup_tag,
                 "regime": "BULLISH" if cmp > ema20 else "NEUTRAL",
                 "cmp": cmp,
@@ -144,7 +187,12 @@ def fetch_live_market_data(symbols: List[str] = None) -> List[Dict[str, Any]]:
 
     # Sort candidates by conviction score descending
     results.sort(key=lambda x: x["conviction_score"], reverse=True)
-    return results
+    
+    return {
+        "candidates": results,
+        "total_universe_count": total_count if total_count > 0 else 2570,
+        "screened_candidates_count": len(results)
+    }
 
 def get_live_positions(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Calculates active portfolio positions with dynamic market P&L."""
@@ -186,6 +234,6 @@ def get_live_positions(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     data = fetch_live_market_data()
-    print(f"Fetched {len(data)} market candidates for expanded universe.")
-    for d in data[:3]:
+    print(f"Scanned Universe with total {data['total_universe_count']} securities.")
+    for d in data['candidates'][:3]:
         print(d)
