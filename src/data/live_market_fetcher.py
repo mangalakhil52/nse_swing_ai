@@ -1,7 +1,7 @@
 """
 Live Market Data Fetcher and Real-Time Scanner Service.
 Fetches real-time market data from NSE/Yahoo Finance, computes live indicators,
-and powers the retro terminal dashboard with true live market prices.
+and powers the retro terminal dashboard with true market prices and detailed universe tracking.
 """
 
 from datetime import datetime, date
@@ -13,26 +13,33 @@ import yfinance as yf
 
 logger = logging.getLogger("live_market_fetcher")
 
-# Universe of top active liquid NSE stocks
-DEFAULT_NSE_UNIVERSE = [
-    "RELIANCE", "TRENT", "TATAMOTORS", "BHARTIARTL", "INFY",
-    "ICICIBANK", "TCS", "LT", "HDFCBANK", "M&M",
-    "BAJFINANCE", "SUNPHARMA", "AXISBANK", "NTPC", "ONGC",
-    "TITAN", "KOTAKBANK", "ADANIENT", "COALINDIA", "BEL"
+# Broad universe of 55 top active liquid NSE equities (NIFTY 50 + NIFTY 500 Leaders)
+EXPANDED_NSE_UNIVERSE = [
+    "RELIANCE", "TRENT", "BHARTIARTL", "INFY", "ICICIBANK",
+    "TCS", "LT", "HDFCBANK", "M&M", "BAJFINANCE",
+    "SUNPHARMA", "AXISBANK", "NTPC", "ONGC", "TITAN",
+    "KOTAKBANK", "ADANIENT", "COALINDIA", "BEL", "HAL",
+    "MARUTI", "SBIN", "TATASTEEL", "WIPRO", "HCLTECH",
+    "ULTRACEMCO", "POWERGRID", "JIOFIN", "NESTLEIND", "ASIANPAINT",
+    "BAJAJFINSV", "GRASIM", "TECHM", "HDFCLIFE", "HINDUNILVR",
+    "DIVISLAB", "CIPLA", "DRREDDY", "EICHERMOT", "HEROMOTOCO",
+    "TATAELXSI", "PERSISTENT", "POLYCAB", "DIXON", "BHEL",
+    "IRFC", "RVNL", "MCX", "ZOMATO", "PAYTM",
+    "BOSCHLTD", "COLPAL", "PIDILITIND", "CHOLAFIN", "VEDL"
 ]
 
 def fetch_live_market_data(symbols: List[str] = None) -> List[Dict[str, Any]]:
-    """Fetches real-time market quotes and computes live technical scan candidates."""
+    """Fetches market quotes and computes live technical scan candidates for the universe."""
     if not symbols:
-        symbols = DEFAULT_NSE_UNIVERSE
+        symbols = EXPANDED_NSE_UNIVERSE
     
     yf_symbols = [f"{s}.NS" for s in symbols]
-    logger.info(f"Fetching live market data for {len(yf_symbols)} NSE tickers via yfinance...")
+    logger.info(f"Fetching market data for {len(yf_symbols)} NSE tickers via yfinance...")
     
     try:
         df_all = yf.download(yf_symbols, period="60d", interval="1d", progress=False)
     except Exception as exc:
-        logger.error(f"Error fetching yfinance live data: {exc}")
+        logger.error(f"Error fetching yfinance market data: {exc}")
         return []
 
     results = []
@@ -60,6 +67,7 @@ def fetch_live_market_data(symbols: List[str] = None) -> List[Dict[str, Any]]:
             cmp = float(close.iloc[-1])
             prev_close = float(close.iloc[-2])
             change_pct = round(((cmp - prev_close) / prev_close) * 100, 2)
+            last_date = close.index[-1].strftime("%Y-%m-%d")
             
             # Technical Indicators
             ema20 = float(close.ewm(span=20, adjust=False).mean().iloc[-1])
@@ -127,6 +135,7 @@ def fetch_live_market_data(symbols: List[str] = None) -> List[Dict[str, Any]]:
                 "t1": t1,
                 "t2": t2,
                 "t3": t3,
+                "price_date": last_date,
                 "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S IST")
             })
         except Exception as exc:
@@ -138,7 +147,7 @@ def fetch_live_market_data(symbols: List[str] = None) -> List[Dict[str, Any]]:
     return results
 
 def get_live_positions(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Calculates active portfolio positions with dynamic live P&L."""
+    """Calculates active portfolio positions with dynamic market P&L."""
     if not candidates:
         return []
     
@@ -169,6 +178,7 @@ def get_live_positions(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]
             "shares": shares,
             "pnl_pct": pnl_pct,
             "pnl_rupees": pnl_rupees,
+            "price_date": cand.get("price_date", date.today().strftime("%Y-%m-%d")),
             "last_updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S IST")
         })
     return positions
@@ -176,6 +186,6 @@ def get_live_positions(candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
     data = fetch_live_market_data()
-    print(f"Fetched {len(data)} live market candidates.")
+    print(f"Fetched {len(data)} market candidates for expanded universe.")
     for d in data[:3]:
         print(d)

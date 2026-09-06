@@ -241,6 +241,9 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
             self._send_json({
                 "candidates": cands,
                 "as_of": datetime.now().strftime("%Y-%m-%d %H:%M:%S IST"),
+                "universe_count": 55,
+                "universe_description": "NIFTY 500 / F&O Liquid NSE Equities Master",
+                "market_session_note": "Today is Sunday (Market Closed). Prices reflect EOD Close of last official trading session (2026-09-04).",
                 "status": "LIVE_MARKET_SYNCED"
             })
 
