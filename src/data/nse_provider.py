@@ -43,13 +43,7 @@ class NseDataProvider(MarketDataProvider):
         self._session: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
-        """Create an NSE session using bounded official-NSE bootstrap fallbacks.
-
-        NSE can return HTTP 403 for the bare homepage even when an official data
-        page is reachable. We therefore bootstrap the same session against a
-        small, deterministic set of official NSE pages. No non-NSE source or
-        fabricated/stale market value is used as a fallback.
-        """
+        """Create an NSE session using bounded official-NSE bootstrap fallbacks."""
         if self._session is None or self._session.is_closed:
             self._session = httpx.AsyncClient(
                 headers=self.headers,
@@ -75,8 +69,6 @@ class NseDataProvider(MarketDataProvider):
                         errors.append(f"{url} -> HTTP {resp.status_code}")
                     except Exception as exc:
                         errors.append(f"{url} -> {type(exc).__name__}: {exc}")
-                    if attempt < 3:
-                        continue
             await self._session.aclose()
             self._session = None
             raise DataUnavailableException(
@@ -120,7 +112,6 @@ class NseDataProvider(MarketDataProvider):
 
     @staticmethod
     def _nse_numeric(series: pd.Series) -> pd.Series:
-        """Parse NSE numeric fields, including comma-formatted values and blanks."""
         return pd.to_numeric(
             series.astype("string").str.strip().str.replace(",", "", regex=False),
             errors="coerce",
@@ -132,18 +123,10 @@ class NseDataProvider(MarketDataProvider):
         if "SERIES" in df.columns:
             df["SERIES"] = df["SERIES"].astype(str).str.strip().str.upper()
             df = df[df["SERIES"].isin(["EQ", "BE", "SM"])].copy()
-
         rename_map = {
-            "SYMBOL": "symbol",
-            "OPEN_PRICE": "open",
-            "HIGH_PRICE": "high",
-            "LOW_PRICE": "low",
-            "CLOSE_PRICE": "close",
-            "TTL_TRD_QNTY": "volume",
-            "DELIV_QTY": "delivery_volume",
-            "DELIV_PER": "delivery_pct",
-            "TURNOVER_LACS": "turnover_lacs",
-            "AVG_PRICE": "vwap",
+            "SYMBOL": "symbol", "OPEN_PRICE": "open", "HIGH_PRICE": "high", "LOW_PRICE": "low",
+            "CLOSE_PRICE": "close", "TTL_TRD_QNTY": "volume", "DELIV_QTY": "delivery_volume",
+            "DELIV_PER": "delivery_pct", "TURNOVER_LACS": "turnover_lacs", "AVG_PRICE": "vwap",
         }
         df = df.rename(columns=rename_map)
         for col in ["open", "high", "low", "close", "volume", "delivery_volume", "delivery_pct", "vwap"]:
@@ -153,20 +136,15 @@ class NseDataProvider(MarketDataProvider):
             df["turnover_crores"] = self._nse_numeric(df["turnover_lacs"]) / 100.0
         elif {"close", "volume"}.issubset(df.columns):
             df["turnover_crores"] = (df["close"] * df["volume"]) / 1e7
-
         df["timestamp"] = pd.Timestamp(target_date)
         df["symbol"] = df["symbol"].astype(str).str.strip().str.upper()
-        required = [
-            "timestamp", "symbol", "open", "high", "low", "close", "volume",
-            "delivery_volume", "delivery_pct", "turnover_crores", "vwap",
-        ]
+        required = ["timestamp", "symbol", "open", "high", "low", "close", "volume", "delivery_volume", "delivery_pct", "turnover_crores", "vwap"]
         missing = [c for c in required if c not in df.columns]
         if missing:
             raise DataUnavailableException(f"NSE Bhavcopy missing required columns: {missing}")
         return df[required].reset_index(drop=True)
 
     async def get_historical_ohlcv(self, symbol: str, start_date: date, end_date: date) -> pd.DataFrame:
-        """Build a validated historical series from official daily Bhavcopies."""
         symbol = symbol.upper().strip()
         records: list[pd.DataFrame] = []
         current = start_date
@@ -180,16 +158,11 @@ class NseDataProvider(MarketDataProvider):
                 except DataUnavailableException:
                     pass
             current += timedelta(days=1)
-
         if not records:
-            return pd.DataFrame(columns=[
-                "timestamp", "symbol", "open", "high", "low", "close", "volume",
-                "delivery_volume", "delivery_pct", "turnover_crores", "vwap",
-            ])
+            return pd.DataFrame(columns=["timestamp", "symbol", "open", "high", "low", "close", "volume", "delivery_volume", "delivery_pct", "turnover_crores", "vwap"])
         return pd.concat(records, ignore_index=True).sort_values("timestamp").reset_index(drop=True)
 
     async def get_latest_quote(self, symbol: str) -> LiveQuote:
-        """Fetch a live NSE equity quote; failures raise instead of fabricating prices."""
         symbol = symbol.upper().strip()
         client = await self._get_client()
         url = f"{self.base_url}/api/quote-equity?{urlencode({'symbol': symbol})}"
@@ -202,27 +175,11 @@ class NseDataProvider(MarketDataProvider):
             last_price = float(price_info.get("lastPrice", 0.0))
             if last_price <= 0:
                 raise DataUnavailableException(f"NSE returned no valid last price for {symbol}")
-            return LiveQuote(
-                symbol=symbol,
-                last_price=last_price,
-                open_price=float(price_info.get("open", last_price)),
-                high_price=float(intra.get("max", last_price)),
-                low_price=float(intra.get("min", last_price)),
-                prev_close=float(price_info.get("previousClose", last_price)),
-                change_pct=float(price_info.get("pChange", 0.0)),
-                total_traded_volume=int(price_info.get("totalTradedVolume", 0)),
-                total_traded_value_crores=float(price_info.get("totalTradedValue", 0.0)) / 1e7,
-                upper_circuit_limit=float(price_info.get("upperCP", 0.0)),
-                lower_circuit_limit=float(price_info.get("lowerCP", 0.0)),
-                vwap=float(price_info.get("vwap", last_price)),
-                timestamp=datetime.now().astimezone(),
-                data_source="NSE_OFFICIAL_API",
-            )
+            return LiveQuote(symbol=symbol, last_price=last_price, open_price=float(price_info.get("open", last_price)), high_price=float(intra.get("max", last_price)), low_price=float(intra.get("min", last_price)), prev_close=float(price_info.get("previousClose", last_price)), change_pct=float(price_info.get("pChange", 0.0)), total_traded_volume=int(price_info.get("totalTradedVolume", 0)), total_traded_value_crores=float(price_info.get("totalTradedValue", 0.0)) / 1e7, upper_circuit_limit=float(price_info.get("upperCP", 0.0)), lower_circuit_limit=float(price_info.get("lowerCP", 0.0)), vwap=float(price_info.get("vwap", last_price)), timestamp=datetime.now().astimezone(), data_source="NSE_OFFICIAL_API")
         except Exception as exc:
             raise DataUnavailableException(f"Unable to fetch live NSE quote for {symbol}: {exc}") from exc
 
     async def get_market_breadth(self, index_symbol: str = "NIFTY 500") -> MarketBreadthData:
-        """Fetch current NSE index breadth; never substitutes fabricated 50/50 values."""
         client = await self._get_client()
         params = urlencode({"index": index_symbol.upper()})
         url = f"{self.base_url}/api/equity-stockIndices?{params}"
@@ -236,26 +193,13 @@ class NseDataProvider(MarketDataProvider):
             advances = sum(float(r.get("pChange", 0.0)) > 0 for r in rows)
             declines = sum(float(r.get("pChange", 0.0)) < 0 for r in rows)
             unchanged = len(rows) - advances - declines
-            return MarketBreadthData(
-                date=date.today(),
-                index_symbol=index_symbol,
-                advances=int(advances),
-                declines=int(declines),
-                unchanged=int(unchanged),
-                advance_decline_ratio=round(advances / max(declines, 1), 2),
-            )
+            return MarketBreadthData(date=date.today(), index_symbol=index_symbol, advances=int(advances), declines=int(declines), unchanged=int(unchanged), advance_decline_ratio=round(advances / max(declines, 1), 2))
         except Exception as exc:
             raise DataUnavailableException(f"Unable to fetch NSE market breadth: {exc}") from exc
 
     async def get_index_history(self, index_name: str, start_date: date, end_date: date) -> pd.DataFrame:
-        """Fetch historical NSE index OHLCV from the official indicesHistory endpoint."""
         client = await self._get_client()
-        params = urlencode({
-            "indexType": "Index Data",
-            "from_date": start_date.strftime("%d-%m-%Y"),
-            "to_date": end_date.strftime("%d-%m-%Y"),
-            "index": index_name,
-        })
+        params = urlencode({"indexType": "Index Data", "from_date": start_date.strftime("%d-%m-%Y"), "to_date": end_date.strftime("%d-%m-%Y"), "index": index_name})
         url = f"{self.base_url}/api/historical/indicesHistory?{params}"
         try:
             resp = await client.get(url, headers={**self.headers, "Referer": f"{self.base_url}/reports-indices-historical-index-data"})
@@ -264,15 +208,7 @@ class NseDataProvider(MarketDataProvider):
             rows = payload.get("data", payload if isinstance(payload, list) else [])
             if not rows:
                 raise DataUnavailableException(f"No historical index data returned for {index_name}")
-            df = pd.DataFrame(rows)
-            mapping = {
-                "EOD_TIMESTAMP": "timestamp",
-                "EOD_OPEN_INDEX_VAL": "open",
-                "EOD_HIGH_INDEX_VAL": "high",
-                "EOD_LOW_INDEX_VAL": "low",
-                "EOD_CLOSE_INDEX_VAL": "close",
-            }
-            df = df.rename(columns=mapping)
+            df = pd.DataFrame(rows).rename(columns={"EOD_TIMESTAMP": "timestamp", "EOD_OPEN_INDEX_VAL": "open", "EOD_HIGH_INDEX_VAL": "high", "EOD_LOW_INDEX_VAL": "low", "EOD_CLOSE_INDEX_VAL": "close"})
             if "timestamp" not in df or "close" not in df:
                 raise DataUnavailableException(f"Unexpected NSE index response schema for {index_name}")
             df["timestamp"] = pd.to_datetime(df["timestamp"], dayfirst=True, errors="coerce")
@@ -285,12 +221,8 @@ class NseDataProvider(MarketDataProvider):
             raise DataUnavailableException(f"Unable to fetch NSE index history for {index_name}: {exc}") from exc
 
     async def get_india_vix_history(self, start_date: date, end_date: date) -> pd.DataFrame:
-        """Fetch historical India VIX from NSE's official VIX endpoint."""
         client = await self._get_client()
-        params = urlencode({
-            "from_date": start_date.strftime("%d-%m-%Y"),
-            "to_date": end_date.strftime("%d-%m-%Y"),
-        })
+        params = urlencode({"from_date": start_date.strftime("%d-%m-%Y"), "to_date": end_date.strftime("%d-%m-%Y")})
         url = f"{self.base_url}/api/historical/vixhistory?{params}"
         try:
             resp = await client.get(url, headers={**self.headers, "Referer": f"{self.base_url}/reports-indices-historical-vix"})
@@ -299,13 +231,7 @@ class NseDataProvider(MarketDataProvider):
             rows = payload.get("data", payload if isinstance(payload, list) else [])
             if not rows:
                 raise DataUnavailableException("No India VIX history returned")
-            df = pd.DataFrame(rows).rename(columns={
-                "EOD_TIMESTAMP": "timestamp",
-                "EOD_OPEN_INDEX_VAL": "open",
-                "EOD_HIGH_INDEX_VAL": "high",
-                "EOD_LOW_INDEX_VAL": "low",
-                "EOD_CLOSE_INDEX_VAL": "close",
-            })
+            df = pd.DataFrame(rows).rename(columns={"EOD_TIMESTAMP": "timestamp", "EOD_OPEN_INDEX_VAL": "open", "EOD_HIGH_INDEX_VAL": "high", "EOD_LOW_INDEX_VAL": "low", "EOD_CLOSE_INDEX_VAL": "close"})
             df["timestamp"] = pd.to_datetime(df["timestamp"], dayfirst=True, errors="coerce")
             for col in ["open", "high", "low", "close"]:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
@@ -315,7 +241,6 @@ class NseDataProvider(MarketDataProvider):
             raise DataUnavailableException(f"Unable to fetch NSE India VIX history: {exc}") from exc
 
     async def fetch_active_securities(self) -> list[SymbolMetadata]:
-        """Fetch all active NSE equity listings from EQUITY_L.csv."""
         cache_file = self.cache_dir / "EQUITY_L.csv"
         url = "https://archives.nseindia.com/content/equities/EQUITY_L.csv"
         client = await self._get_client()
@@ -331,7 +256,6 @@ class NseDataProvider(MarketDataProvider):
                 raise DataUnavailableException(f"Could not download NSE EQUITY_L.csv: {exc}") from exc
             logger.warning("Using cached EQUITY_L.csv because refresh failed: %s", exc)
             df = pd.read_csv(cache_file)
-
         df.columns = [str(c).strip().upper() for c in df.columns]
         securities: list[SymbolMetadata] = []
         for _, row in df.iterrows():
@@ -339,6 +263,8 @@ class NseDataProvider(MarketDataProvider):
             series = str(row.get("SERIES", "EQ")).strip().upper()
             name = str(row.get("NAME OF COMPANY", row.get("COMPANY NAME", sym))).strip()
             isin = str(row.get("ISIN NUMBER", row.get("ISIN", ""))).strip()
-            if sym and series in {"EQ", "SM", "BE"}:
-                securities.append(SymbolMetadata(symbol=sym, company_name=name, isin=isin, exchange="NSE", sector=""))
+            if sym and series in {"EQ", "BE", "SM"}:
+                securities.append(SymbolMetadata(symbol=sym, company_name=name, isin=isin or None, exchange="NSE", is_active=True, is_fno_eligible=False))
+        if not securities:
+            raise DataUnavailableException("NSE EQUITY_L.csv yielded no active equity securities")
         return securities
