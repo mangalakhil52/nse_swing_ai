@@ -26,19 +26,34 @@ class NseIndexDataProvider:
         self._session: httpx.AsyncClient | None = None
 
     async def _client(self) -> httpx.AsyncClient:
+        """Bootstrap an NSE session through official pages when the homepage is 403."""
         if self._session is None or self._session.is_closed:
             self._session = httpx.AsyncClient(
                 headers=self.headers,
                 timeout=settings.REQUEST_TIMEOUT_SECONDS,
                 follow_redirects=True,
             )
-            try:
-                r = await self._session.get(self.base_url)
-                r.raise_for_status()
-            except Exception as exc:
-                await self._session.aclose()
-                self._session = None
-                raise DataUnavailableException(f"Unable to initialize NSE index session: {exc}") from exc
+            bootstrap_urls = [
+                f"{self.base_url}/option-chain",
+                f"{self.base_url}/",
+                f"{self.base_url}/reports-indices-historical-index-data",
+            ]
+            errors: list[str] = []
+            for url in bootstrap_urls:
+                for _ in range(3):
+                    try:
+                        response = await self._session.get(url, headers={**self.headers, "Referer": f"{self.base_url}/"})
+                        if response.status_code < 400:
+                            return self._session
+                        errors.append(f"{url} -> HTTP {response.status_code}")
+                    except Exception as exc:
+                        errors.append(f"{url} -> {type(exc).__name__}: {exc}")
+            await self._session.aclose()
+            self._session = None
+            raise DataUnavailableException(
+                "Unable to initialize NSE index session after official NSE bootstrap attempts: "
+                + "; ".join(errors[-6:])
+            )
         return self._session
 
     async def close(self) -> None:
@@ -48,13 +63,14 @@ class NseIndexDataProvider:
     async def get_index_history(self, index_name: str, start_date: date, end_date: date) -> pd.DataFrame:
         client = await self._client()
         params = urlencode({
-            "indexType": index_name,
-            "from": start_date.strftime("%d-%m-%Y"),
-            "to": end_date.strftime("%d-%m-%Y"),
+            "indexType": "Index Data",
+            "from_date": start_date.strftime("%d-%m-%Y"),
+            "to_date": end_date.strftime("%d-%m-%Y"),
+            "index": index_name,
         })
         url = f"{self.base_url}/api/historical/indicesHistory?{params}"
         try:
-            response = await client.get(url)
+            response = await client.get(url, headers={**self.headers, "Referer": f"{self.base_url}/reports-indices-historical-index-data"})
             response.raise_for_status()
             payload = response.json()
             data = payload.get("data", {}) if isinstance(payload, dict) else {}
@@ -62,11 +78,8 @@ class NseIndexDataProvider:
             if not rows:
                 raise DataUnavailableException(f"No NSE index observations for {index_name}")
             df = pd.DataFrame(rows).rename(columns={
-                "EOD_TIMESTAMP": "timestamp",
-                "EOD_OPEN_INDEX_VAL": "open",
-                "EOD_HIGH_INDEX_VAL": "high",
-                "EOD_LOW_INDEX_VAL": "low",
-                "EOD_CLOSE_INDEX_VAL": "close",
+                "EOD_TIMESTAMP": "timestamp", "EOD_OPEN_INDEX_VAL": "open", "EOD_HIGH_INDEX_VAL": "high",
+                "EOD_LOW_INDEX_VAL": "low", "EOD_CLOSE_INDEX_VAL": "close",
             })
             required = ["timestamp", "open", "high", "low", "close"]
             missing = [c for c in required if c not in df.columns]
@@ -85,24 +98,18 @@ class NseIndexDataProvider:
 
     async def get_india_vix_history(self, start_date: date, end_date: date) -> pd.DataFrame:
         client = await self._client()
-        params = urlencode({
-            "from": start_date.strftime("%d-%m-%Y"),
-            "to": end_date.strftime("%d-%m-%Y"),
-        })
-        url = f"{self.base_url}/historicalOR/vixhistory?{params}"
+        params = urlencode({"from_date": start_date.strftime("%d-%m-%Y"), "to_date": end_date.strftime("%d-%m-%Y")})
+        url = f"{self.base_url}/api/historical/vixhistory?{params}"
         try:
-            response = await client.get(url)
+            response = await client.get(url, headers={**self.headers, "Referer": f"{self.base_url}/reports-indices-historical-vix"})
             response.raise_for_status()
             payload = response.json()
             rows = payload.get("data", []) if isinstance(payload, dict) else payload
             if not rows:
                 raise DataUnavailableException("No NSE India VIX observations returned")
             df = pd.DataFrame(rows).rename(columns={
-                "EOD_TIMESTAMP": "timestamp",
-                "EOD_OPEN_INDEX_VAL": "open",
-                "EOD_HIGH_INDEX_VAL": "high",
-                "EOD_LOW_INDEX_VAL": "low",
-                "EOD_CLOSE_INDEX_VAL": "close",
+                "EOD_TIMESTAMP": "timestamp", "EOD_OPEN_INDEX_VAL": "open", "EOD_HIGH_INDEX_VAL": "high",
+                "EOD_LOW_INDEX_VAL": "low", "EOD_CLOSE_INDEX_VAL": "close",
             })
             df["timestamp"] = pd.to_datetime(df["timestamp"], dayfirst=True, errors="coerce")
             for col in ["open", "high", "low", "close"]:
