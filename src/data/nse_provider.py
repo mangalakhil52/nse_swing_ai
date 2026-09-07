@@ -43,20 +43,46 @@ class NseDataProvider(MarketDataProvider):
         self._session: httpx.AsyncClient | None = None
 
     async def _get_client(self) -> httpx.AsyncClient:
+        """Create an NSE session using bounded official-NSE bootstrap fallbacks.
+
+        NSE can return HTTP 403 for the bare homepage even when an official data
+        page is reachable. We therefore bootstrap the same session against a
+        small, deterministic set of official NSE pages. No non-NSE source or
+        fabricated/stale market value is used as a fallback.
+        """
         if self._session is None or self._session.is_closed:
             self._session = httpx.AsyncClient(
                 headers=self.headers,
                 timeout=settings.REQUEST_TIMEOUT_SECONDS,
                 follow_redirects=True,
             )
-            try:
-                resp = await self._session.get(self.base_url)
-                resp.raise_for_status()
-                logger.debug("Initialized NSE session cookies.")
-            except Exception as exc:
-                await self._session.aclose()
-                self._session = None
-                raise DataUnavailableException(f"Unable to initialize NSE session: {exc}") from exc
+            bootstrap_urls = [
+                f"{self.base_url}/option-chain",
+                f"{self.base_url}/",
+                f"{self.base_url}/reports-indices-historical-index-data",
+            ]
+            errors: list[str] = []
+            for url in bootstrap_urls:
+                for attempt in range(1, 4):
+                    try:
+                        resp = await self._session.get(
+                            url,
+                            headers={**self.headers, "Referer": f"{self.base_url}/"},
+                        )
+                        if resp.status_code < 400:
+                            logger.debug("Initialized NSE session via %s", url)
+                            return self._session
+                        errors.append(f"{url} -> HTTP {resp.status_code}")
+                    except Exception as exc:
+                        errors.append(f"{url} -> {type(exc).__name__}: {exc}")
+                    if attempt < 3:
+                        continue
+            await self._session.aclose()
+            self._session = None
+            raise DataUnavailableException(
+                "Unable to initialize NSE session after official NSE bootstrap attempts: "
+                + "; ".join(errors[-6:])
+            )
         return self._session
 
     async def close(self) -> None:
@@ -286,7 +312,7 @@ class NseDataProvider(MarketDataProvider):
             df = df.dropna(subset=["timestamp", "close"]).sort_values("timestamp")
             return df.reset_index(drop=True)
         except Exception as exc:
-            raise DataUnavailableException(f"Unable to fetch India VIX history: {exc}") from exc
+            raise DataUnavailableException(f"Unable to fetch NSE India VIX history: {exc}") from exc
 
     async def fetch_active_securities(self) -> list[SymbolMetadata]:
         """Fetch all active NSE equity listings from EQUITY_L.csv."""
@@ -313,17 +339,6 @@ class NseDataProvider(MarketDataProvider):
             series = str(row.get("SERIES", "EQ")).strip().upper()
             name = str(row.get("NAME OF COMPANY", row.get("COMPANY NAME", sym))).strip()
             isin = str(row.get("ISIN NUMBER", row.get("ISIN", ""))).strip()
-            if sym and series in {"EQ", "BE", "SM"}:
-                securities.append(
-                    SymbolMetadata(
-                        symbol=sym,
-                        company_name=name,
-                        isin=isin or None,
-                        exchange="NSE",
-                        is_active=True,
-                        is_fno_eligible=False,
-                    )
-                )
-        if not securities:
-            raise DataUnavailableException("NSE EQUITY_L.csv yielded no active equity securities")
+            if sym and series in {"EQ", "SM", "BE"}:
+                securities.append(SymbolMetadata(symbol=sym, company_name=name, isin=isin, exchange="NSE", sector=""))
         return securities
