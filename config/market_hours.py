@@ -51,34 +51,53 @@ def is_trading_day(check_date: date | None = None) -> bool:
     if check_date is None:
         check_date = get_current_ist_datetime().date()
 
-    # Weekend check: Monday=0, Sunday=6
     if check_date.weekday() >= 5:
         return False
-
-    # Holiday check
     if check_date in NSE_HOLIDAYS_2026:
         return False
-
     return True
 
 
 def get_latest_trading_day(check_date: date | None = None) -> date:
     """
-    Returns the most recent completed NSE trading day.
-    If check_date is today before EOD_DATA_AVAILABLE (15:45 IST), Saturday, Sunday, or holiday,
-    steps backward to the preceding completed trading session (e.g. Friday).
+    Returns the most recent completed NSE trading session.
+
+    For today's live execution, today's session is considered complete only after
+    EOD_DATA_AVAILABLE (15:45 IST). Before that cutoff, the function returns the
+    preceding completed trading session. For weekends/holidays it walks backward.
     """
     if check_date is None:
         check_date = get_current_ist_datetime().date()
 
     curr = check_date
-    # If checking for today before 15:45 IST, EOD data is not yet published
     if check_date == get_current_ist_datetime().date() and not is_eod_scan_ready():
         curr -= timedelta(days=1)
 
     while not is_trading_day(curr):
         curr -= timedelta(days=1)
 
+    return curr
+
+
+def resolve_scan_date(requested_date: date | None = None, now: datetime | None = None) -> date:
+    """
+    Resolve the date used by the daily scanner.
+
+    Explicit ``requested_date`` is always honored for historical/manual runs.
+    Without it, use the current IST session: today's date after the EOD data
+    cutoff, otherwise the previous completed trading day. This makes the live
+    scanner deterministic and prevents use of an incomplete current-day candle.
+    """
+    if requested_date is not None:
+        return requested_date
+
+    current = now.astimezone(IST) if now is not None else get_current_ist_datetime()
+    if is_trading_day(current.date()) and current.time() >= EOD_DATA_AVAILABLE:
+        return current.date()
+
+    curr = current.date() - timedelta(days=1) if is_trading_day(current.date()) else current.date()
+    while not is_trading_day(curr):
+        curr -= timedelta(days=1)
     return curr
 
 
@@ -100,7 +119,7 @@ def is_eod_scan_ready(dt: datetime | None = None) -> bool:
         dt = get_current_ist_datetime()
 
     if not is_trading_day(dt.date()):
-        return True  # Over the weekend/holiday, previous confirmed data is always ready
+        return True
 
     return dt.time() >= EOD_DATA_AVAILABLE
 
@@ -133,6 +152,7 @@ class MarketCalendar:
     get_current_ist_datetime = staticmethod(get_current_ist_datetime)
     is_trading_day = staticmethod(is_trading_day)
     get_latest_trading_day = staticmethod(get_latest_trading_day)
+    resolve_scan_date = staticmethod(resolve_scan_date)
     get_next_trading_sessions = staticmethod(get_next_trading_sessions)
     get_previous_trading_sessions = staticmethod(get_previous_trading_sessions)
     is_market_open = staticmethod(is_market_open)
