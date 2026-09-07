@@ -11,7 +11,7 @@ import uuid
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from config.market_hours import get_latest_trading_day, is_trading_day
+from config.market_hours import is_trading_day, resolve_scan_date
 from src.agents.cio_orchestrator import CIOOrchestrator
 from src.core.exceptions import DataUnavailableException
 from src.data.bulk_history import BulkHistoricalLoader
@@ -165,7 +165,9 @@ async def run_scan(scan_date: date, dry_run: bool = False, force: bool = False, 
 
 def main() -> None:
     args = parse_args()
-    scan_date = date.fromisoformat(args.date) if args.date else get_latest_trading_day(date.today())
+    requested_date = date.fromisoformat(args.date) if args.date else None
+    scan_date = resolve_scan_date(requested_date=requested_date)
+    logger.info("Resolved scan date: %s%s", scan_date, " (explicit)" if requested_date else " (live EOD resolution)")
     sys.exit(asyncio.run(run_scan(scan_date, dry_run=args.dry_run, force=args.force, telegram_required=args.telegram_required)))
 
 
