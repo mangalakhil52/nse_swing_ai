@@ -43,6 +43,16 @@ async def run_scan(scan_date: date, dry_run: bool = False, force: bool = False, 
     init_db()
     telegram = TelegramSender()
 
+    def send_no_trade(reason: str, *, regime: str | None = None) -> None:
+        message = TelegramFormatter.format_no_trade(scan_date, reason, regime=regime, run_id=run_id)
+        logger.info("Telegram No-Trade Output:\n%s", message)
+        telegram.send(message, required=telegram_required)
+
+    def send_system_status(reason: str) -> None:
+        message = TelegramFormatter.format_system_status(scan_date, reason, run_id=run_id)
+        logger.info("Telegram System Status Output:\n%s", message)
+        telegram.send(message, required=telegram_required)
+
     if not force and not is_trading_day(scan_date):
         logger.info("%s is not an NSE trading day; no scan executed.", scan_date)
         return 0
@@ -105,6 +115,7 @@ async def run_scan(scan_date: date, dry_run: bool = False, force: bool = False, 
         logger.info("Regime=%s | stance=%s | A/D=%.2f | >50SMA=%.1f%% | VIX=%.2f", regime_result.regime.value, regime_result.trading_stance.value, ad_ratio, pct_above_50, vix)
         if not regime_result.allow_long_swing_trades:
             logger.warning("Market regime blocks long swing trades; returning NO TRADE TODAY")
+            send_no_trade("Market regime blocks long swing trades", regime=regime_result.regime.value)
             return 0
 
         candidate_dfs = {m.symbol: stock_dfs[m.symbol] for m in eligible_meta if m.symbol in stock_dfs}
@@ -121,6 +132,7 @@ async def run_scan(scan_date: date, dry_run: bool = False, force: bool = False, 
         logger.info("Final Stage-1 candidates: %d", len(candidates))
         if not candidates:
             logger.info("NO TRADE TODAY: Stage-1 screener produced no candidates")
+            send_no_trade("Stage-1 screener produced no qualifying candidates", regime=regime_result.regime.value)
             return 0
 
         cio = CIOOrchestrator()
@@ -136,12 +148,15 @@ async def run_scan(scan_date: date, dry_run: bool = False, force: bool = False, 
                 telegram.send(TelegramFormatter.format_recommendation(rec), required=telegram_required)
         else:
             logger.info("NO TRADE TODAY: CIO rejected all candidates")
+            send_no_trade("CIO rejected all Stage-1 candidates", regime=regime_result.regime.value)
         return 0
     except DataUnavailableException as exc:
         logger.error("DATA_UNAVAILABLE: %s", exc)
+        send_system_status(f"DATA_UNAVAILABLE — {exc}")
         return 1
-    except Exception:
+    except Exception as exc:
         logger.exception("Daily scan failed closed due to unexpected error")
+        send_system_status(f"SCAN_FAILED_CLOSED — {type(exc).__name__}: {exc}")
         return 1
     finally:
         await bulk_loader.close()
